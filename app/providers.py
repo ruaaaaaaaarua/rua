@@ -31,6 +31,13 @@ class ProviderError(RuntimeError):
     """A provider failure safe to display to a local user."""
 
 
+# Whole-page transcription needs thousands of tokens; provider defaults cap far too low.
+TASK_LIMITS = {
+    "vision": {"max_tokens": 16384, "timeout": 420.0},
+    "default": {"max_tokens": 8192, "timeout": 180.0},
+}
+
+
 class ModelGateway:
     def __init__(self, settings: Dict[str, Any], transport=None):
         self.settings = settings
@@ -43,10 +50,21 @@ class ModelGateway:
         ]
         for image in images:
             content.append({"type": "image_url", "image_url": {"url": image["data_url"]}})
-        result = await self._call("vision", content, ExtractedQuestions)
+        result = await self._call("vision", content, ExtractedQuestions, coerce=self._unwrap_root)
         if not result.root:
             raise ProviderError("未识别到题目，请确认图片清晰且包含完整题目")
         return [item.model_dump() for item in result.root]
+
+    @staticmethod
+    def _unwrap_root(payload: Any) -> Any:
+        # Some providers wrap the requested array in an object or return one bare item.
+        if isinstance(payload, dict):
+            if "kind" in payload or "text" in payload:
+                return [payload]
+            lists = [value for value in payload.values() if isinstance(value, list)]
+            if len(lists) == 1:
+                return lists[0]
+        return payload
 
     async def extract_reference(self, images: List[Dict[str, str]]) -> Dict[str, Any]:
         content: List[Dict[str, Any]] = [{
@@ -120,7 +138,9 @@ class ModelGateway:
                 raise ProviderError("模型配置不完整")
         return profile
 
-    async def _call(self, task: str, content: Any, schema: Type[BaseModel]) -> BaseModel:
+    async def _call(
+        self, task: str, content: Any, schema: Type[BaseModel], coerce=None
+    ) -> BaseModel:
         profile = self._profile(task)
         started = time.monotonic()
         response = None
@@ -131,8 +151,10 @@ class ModelGateway:
             "Content-Type": "application/json",
         }
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+        limits = TASK_LIMITS.get(task, TASK_LIMITS["default"])
         body = {
             "model": profile["model"],
+            "max_tokens": limits["max_tokens"],
             "messages": [
                 {
                     "role": "system",
@@ -144,8 +166,11 @@ class ModelGateway:
                 {"role": "user", "content": content},
             ],
         }
+        # Opt-in GLM-style reasoning switch; providers without it stay untouched.
+        if profile.get("disable_thinking"):
+            body["thinking"] = {"type": "disabled"}
         try:
-            timeout = httpx.Timeout(120.0)
+            timeout = httpx.Timeout(limits["timeout"])
             async with httpx.AsyncClient(transport=self.transport, timeout=timeout) as client:
                 for attempt in range(2):
                     try:
@@ -164,6 +189,8 @@ class ModelGateway:
             envelope = response.json()
             raw = envelope["choices"][0]["message"]["content"]
             payload = self._parse_json(raw)
+            if coerce is not None:
+                payload = coerce(payload)
             result = schema.model_validate(payload)
             success = True
             return result

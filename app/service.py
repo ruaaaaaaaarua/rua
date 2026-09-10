@@ -1,4 +1,5 @@
 """Learning orchestration; model outputs are proposals, not mutations."""
+import asyncio
 import base64
 import copy
 import json
@@ -73,11 +74,27 @@ class LearningService:
             a['extracted']=True
             self.store.save_session(s)
         failures=[]
-        for q in s['questions']:
-            if q.get('analysis',{}).get('status')=='confirmed': continue
+        # Whole pages solve in bounded parallel; each result persists as it lands.
+        semaphore=asyncio.Semaphore(3)
+
+        async def diagnose_question(q):
             try:
-                solution=await gateway.solve(q)
-                diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
+                async with semaphore:
+                    solution=await gateway.solve(q)
+                    diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
+                return q,solution,diagnosis,None
+            except Exception as e:
+                from .providers import ProviderError
+                if not isinstance(e,ProviderError): raise
+                return q,None,None,str(e)
+
+        tasks=[diagnose_question(q) for q in s['questions'] if q.get('analysis',{}).get('status')!='confirmed']
+        for future in asyncio.as_completed(tasks):
+            q,solution,diagnosis,error=await future
+            if error:
+                failures.append(str(q.get('number','')))
+                q['analysis']=dict(correct=None,status='pending',source='ai',diagnosis=error,knowledge_point='',hint='请核对题目信息后重试。')
+            else:
                 answer=solution.get('answer','')
                 valid=solution.get('valid',True) and solution.get('status','confirmed')!='pending' and diagnosis.get('status','confirmed')!='pending' and bool(answer)
                 supplied=bool(str(q.get('user_answer') or '').strip())
@@ -86,11 +103,6 @@ class LearningService:
                     'correct':correct,'status':'confirmed' if valid and supplied else 'pending','source':'ai'}
                 q['solution']=solution
                 self.store.record_evidence(s['id'],q)
-            except Exception as e:
-                from .providers import ProviderError
-                if not isinstance(e,ProviderError): raise
-                failures.append(str(q.get('number','')))
-                q['analysis']=dict(correct=None,status='pending',source='ai',diagnosis=str(e),knowledge_point='',hint='请核对题目信息后重试。')
             self.store.save_session(s)
         s.update(status='error' if failures else 'ready',error='部分题目未能完成分析，可重试：'+ '、'.join(failures) if failures else None)
         if not any(m['type']=='overview' for m in s['messages']):

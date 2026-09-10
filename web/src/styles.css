@@ -760,7 +760,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   margin-bottom: 10px;
 }
 .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.profile-actions { display: flex; gap: 4px; margin-top: 10px; }
+.profile-actions { display: flex; gap: 4px; margin-top: 10px; align-items: center; }
+.thinking-toggle {
+  display: flex; align-items: center; gap: 6px; margin-right: auto;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  cursor: pointer; user-select: none;
+}
+.thinking-toggle input { width: auto; margin: 0; accent-color: var(--accent); }
 .advanced-toggle {
   display: flex; align-items: center; gap: 6px;
   font-size: 13.5px; font-weight: 600; color: var(--ink-2);

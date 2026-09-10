@@ -61,6 +61,7 @@ class Profile(Input):
     api_key:Optional[str]=Field(default=None,max_length=4096)
     has_key:Optional[bool]=None
     remove_key:bool=False
+    disable_thinking:bool=False
 
     @field_validator('base_url')
     @classmethod
