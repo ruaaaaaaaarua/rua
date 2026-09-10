@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { groupKnowledge, questionProgress } from './domain.js'
+import { groupKnowledge, knowledgeState, questionProgress } from './domain.js'
 
 describe('questionProgress', () => {
   it('counts confirmed, pending and unanswered questions', () => {
@@ -9,6 +9,16 @@ describe('questionProgress', () => {
       { user_answer: '', analysis: null },
     ]
     expect(questionProgress(questions)).toEqual({ total: 3, answered: 2, confirmed: 1, correct: 1, pending: 1 })
+  })
+})
+
+describe('knowledgeState', () => {
+  it('maps every backend state to a display key and falls back safely', () => {
+    expect(knowledgeState('待验证')).toEqual({ key: 'weak', label: '需要关注' })
+    expect(knowledgeState('表现较稳定').key).toBe('mastered')
+    expect(knowledgeState('独立验证通过').key).toBe('stable')
+    expect(knowledgeState('未知状态')).toEqual({ key: 'unknown', label: '未知状态' })
+    expect(knowledgeState(undefined)).toEqual({ key: 'unknown', label: '尚无记录' })
   })
 })
 
