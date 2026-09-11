@@ -63,6 +63,7 @@ class Profile(Input):
     has_key:Optional[bool]=None
     remove_key:bool=False
     disable_thinking:bool=False
+    parallel:Optional[int]=Field(default=None,ge=1,le=8)
 
     @field_validator('base_url')
     @classmethod

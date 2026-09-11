@@ -5,6 +5,7 @@ import pytest
 
 from app.providers import ModelGateway, ProviderError
 from app.prompts import diagnosis_batch_prompt, solve_batch_prompt, stream_extraction_prompt
+from app.store import Store
 
 
 @pytest.fixture
@@ -57,6 +58,41 @@ def response(payload, status=200):
         status,
         json={"choices": [{"message": {"content": json.dumps(payload)}}]},
     )
+
+
+def test_profile_parallel_takes_precedence_over_legacy_global_parallel():
+    config = settings()
+    config["parallel"] = 2
+    config["profiles"][1]["parallel"] = 3
+
+    gateway = ModelGateway(config)
+
+    assert gateway.parallel_for("solve") == 3
+
+
+def test_distinct_profile_account_identities_have_distinct_rate_keys():
+    config_a = settings(api_key="account-a")
+    config_b = settings(api_key="account-b")
+    gateway_a = ModelGateway(config_a)
+    gateway_b = ModelGateway(config_b)
+    profile_a = config_a["profiles"][1]
+    profile_b = config_b["profiles"][1]
+
+    assert gateway_a.rate_key(profile_a) != gateway_b.rate_key(profile_b)
+
+
+@pytest.mark.anyio
+async def test_response_schema_failure_records_safe_error_kind(tmp_path):
+    store = Store(tmp_path)
+    gateway = ModelGateway(settings(), httpx.MockTransport(lambda request: response({"answer": "A"})))
+    gateway.observer = store.record_call
+
+    with pytest.raises(ProviderError, match="响应格式"):
+        await gateway.solve({"text": "题目", "user_answer": "B"})
+
+    with store.connect() as db:
+        event = json.loads(db.execute("SELECT data FROM calls").fetchone()["data"])
+    assert event["error_kind"] == "response_schema"
 
 
 @pytest.mark.anyio

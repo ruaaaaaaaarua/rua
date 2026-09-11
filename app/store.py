@@ -96,8 +96,10 @@ class Store:
         return settings
 
     def record_call(self,event):
-        allowed=('task','profile_id','model','input_tokens','output_tokens','duration_ms','success')
+        allowed=('task','profile_id','model','input_tokens','output_tokens','duration_ms','success','error_kind')
         clean={k:event.get(k) for k in allowed}
+        if 'error_kind' not in event:
+            clean.pop('error_kind')
         clean['created_at']=now()
         with self.connect() as db:
             db.execute('INSERT INTO calls VALUES (?,?)',(uid(),json.dumps(clean,ensure_ascii=False)))

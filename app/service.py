@@ -186,9 +186,10 @@ class LearningService:
                 merge(q,solutions[i],diagnoses[i]); self.store.save_session(s)
             else: remaining.append((q,solutions.get(i)))
 
-        # Fresh provider accounts allow a single in-flight request; parallel
-        # starts trip concurrency 429s for every call in the burst.
-        parallel=int(self.store.settings().get('parallel') or 1)
+        # Concurrency belongs to the selected provider profile so distinct
+        # accounts can progress independently while legacy settings still work.
+        parallel_for=getattr(gateway,'parallel_for',None)
+        parallel=parallel_for('solve') if callable(parallel_for) else int(self.store.settings().get('parallel') or 1)
         semaphore=asyncio.Semaphore(parallel)
 
         async def diagnose_question(q,solution=None):

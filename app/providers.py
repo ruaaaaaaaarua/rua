@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import inspect
 import time
@@ -36,6 +37,10 @@ from .prompts import (
 class ProviderError(RuntimeError):
     """A provider failure safe to display to a local user."""
 
+    def __init__(self, message: str, error_kind: str = "provider_error"):
+        super().__init__(message)
+        self.error_kind = error_kind
+
 
 # Whole-page transcription needs thousands of tokens; provider defaults cap far too low.
 TASK_LIMITS = {
@@ -51,8 +56,8 @@ class ModelGateway:
     # transcription drains that window and starves the solving phase.
     RATE_WINDOW = 60.0
     DEFAULT_RATE_BUDGET = 15000
-    # Shared per process: every gateway instance hits the same provider account.
-    _usage_events: list = []
+    # Shared per process, but only between gateways using the same account.
+    _usage_events: Dict[str, list] = {}
 
     def __init__(self, settings: Dict[str, Any], transport=None):
         self.settings = settings
@@ -60,23 +65,33 @@ class ModelGateway:
         self.observer = None
         self.rate_budget = int(settings.get("rate_tpm") or self.DEFAULT_RATE_BUDGET)
 
-    async def _await_token_budget(self) -> None:
-        while self._usage_events:
+    @staticmethod
+    def rate_key(profile: Dict[str, Any]) -> str:
+        identity = "\0".join((profile["base_url"], profile["model"], profile["api_key"]))
+        return hashlib.sha256(identity.encode()).hexdigest()
+
+    def parallel_for(self, task: str) -> int:
+        profile = self._profile(task)
+        return int(profile.get("parallel") or self.settings.get("parallel") or 1)
+
+    async def _await_token_budget(self, profile: Dict[str, Any]) -> None:
+        events = self._usage_events.setdefault(self.rate_key(profile), [])
+        while events:
             now = time.monotonic()
-            self._usage_events[:] = [
+            events[:] = [
                 (at, tokens)
-                for at, tokens in self._usage_events
+                for at, tokens in events
                 if now - at < self.RATE_WINDOW
             ]
-            if sum(tokens for _, tokens in self._usage_events) < self.rate_budget:
+            if sum(tokens for _, tokens in events) < self.rate_budget:
                 return
-            oldest = self._usage_events[0][0]
+            oldest = events[0][0]
             await asyncio.sleep(min(62.0, max(2.0, self.RATE_WINDOW - (now - oldest) + 2.0)))
 
-    def _note_usage(self, usage: Dict[str, Any]) -> None:
+    def _note_usage(self, profile: Dict[str, Any], usage: Dict[str, Any]) -> None:
         tokens = usage.get("completion_tokens") or 0
         if tokens:
-            self._usage_events.append((time.monotonic(), tokens))
+            self._usage_events.setdefault(self.rate_key(profile), []).append((time.monotonic(), tokens))
 
     async def extract(self, images: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         content: List[Dict[str, Any]] = [
@@ -86,7 +101,7 @@ class ModelGateway:
             content.append({"type": "image_url", "image_url": {"url": image["data_url"]}})
         result = await self._call("vision", content, ExtractedQuestions, coerce=self._unwrap_root)
         if not result.root:
-            raise ProviderError("未识别到题目，请确认图片清晰且包含完整题目")
+            raise ProviderError("未识别到题目，请确认图片清晰且包含完整题目", "response_schema")
         return [item.model_dump() for item in result.root]
 
     async def stream_extract(self, images: List[Dict[str, str]]) -> AsyncIterator[str]:
@@ -170,19 +185,19 @@ class ModelGateway:
 
     async def chat(self, context: Any, text: str, mode: str) -> Dict[str, Any]:
         if mode not in {"direct", "hint"}:
-            raise ProviderError("对话模式无效")
+            raise ProviderError("对话模式无效", "request_invalid")
         return (await self._call("chat", chat_prompt(context, text, mode), ChatReply)).model_dump(
             exclude_none=True
         )
 
     async def generate(self, context: Any, purpose: str) -> Dict[str, Any]:
         if purpose not in {"variant", "verify", "prerequisite", "depth"}:
-            raise ProviderError("训练目的无效")
+            raise ProviderError("训练目的无效", "request_invalid")
         result = await self._call(
             "generate", generation_prompt(context, purpose), GeneratedQuestion
         )
         if result.purpose != purpose:
-            raise ProviderError("模型响应格式不符合要求，请重试")
+            raise ProviderError("模型响应格式不符合要求，请重试", "response_schema")
         return result.model_dump()
 
     async def verify(self, question: Dict[str, Any]) -> Dict[str, Any]:
@@ -198,7 +213,7 @@ class ModelGateway:
             options = [Option.model_validate(item) for item in question.get("options", [])]
             validate_choice_answer(question.get("kind", "short"), options, answer)
         except (TypeError, ValueError, ValidationError):
-            raise ProviderError("模型响应格式不符合要求，请重试") from None
+            raise ProviderError("模型响应格式不符合要求，请重试", "response_schema") from None
 
     def _profile(self, task: str) -> Dict[str, Any]:
         profile_id = self.settings.get("tasks", {}).get(task)
@@ -207,19 +222,20 @@ class ModelGateway:
             None,
         )
         if not profile:
-            raise ProviderError(f"未配置 {task} 任务的模型")
+            raise ProviderError(f"未配置 {task} 任务的模型", "configuration")
         if not str(profile.get("api_key", "")).strip():
-            raise ProviderError("未配置 API Key")
+            raise ProviderError("未配置 API Key", "configuration")
         for field in ("base_url", "model"):
             if not str(profile.get(field, "")).strip():
-                raise ProviderError("模型配置不完整")
+                raise ProviderError("模型配置不完整", "configuration")
         return profile
 
     async def _stream(self, task: str, content: Any, max_tokens: Optional[int] = None) -> AsyncIterator[str]:
-        await self._await_token_budget()
         profile = self._profile(task)
+        await self._await_token_budget(profile)
         started = time.monotonic()
         success = False
+        error_kind = None
         limits = TASK_LIMITS.get(task, TASK_LIMITS["default"])
         body = {
             "model": profile["model"],
@@ -238,7 +254,7 @@ class ModelGateway:
             async with httpx.AsyncClient(transport=self.transport, timeout=timeout) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code >= 400:
-                        raise ProviderError("模型服务拒绝了请求，请检查本地配置")
+                        raise ProviderError("模型服务拒绝了请求，请检查本地配置", "provider_rejected")
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -249,14 +265,16 @@ class ModelGateway:
                         try:
                             delta = json.loads(data)["choices"][0]["delta"].get("content")
                         except (TypeError, ValueError, KeyError, IndexError):
-                            raise ProviderError("模型流式响应格式不符合要求，请重试") from None
+                            raise ProviderError("模型流式响应格式不符合要求，请重试", "response_schema") from None
                         if delta:
                             yield delta
-            raise ProviderError("模型流式响应提前结束，请重试")
-        except ProviderError:
+            raise ProviderError("模型流式响应提前结束，请重试", "response_schema")
+        except ProviderError as exc:
+            error_kind = exc.error_kind
             raise
         except (httpx.TimeoutException, httpx.NetworkError):
-            raise ProviderError("模型服务暂时不可用，请稍后重试") from None
+            error_kind = "provider_unavailable"
+            raise ProviderError("模型服务暂时不可用，请稍后重试", error_kind) from None
         finally:
             event = {
                 "task": task,
@@ -267,6 +285,8 @@ class ModelGateway:
                 "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
                 "success": success,
             }
+            if error_kind:
+                event["error_kind"] = error_kind
             if self.observer:
                 try:
                     observed = self.observer(event)
@@ -278,11 +298,12 @@ class ModelGateway:
     async def _call(
         self, task: str, content: Any, schema: Type[BaseModel], coerce=None, batch: bool = False
     ) -> BaseModel:
-        await self._await_token_budget()
         profile = self._profile(task)
+        await self._await_token_budget(profile)
         started = time.monotonic()
         response = None
         success = False
+        error_kind = None
         url = profile["base_url"].rstrip("/") + "/chat/completions"
         headers = {
             "Authorization": "Bearer " + profile["api_key"],
@@ -322,22 +343,22 @@ class ModelGateway:
                             await asyncio.sleep(5)
                             attempt += 1
                             continue
-                        raise ProviderError("模型服务暂时不可用，请稍后重试") from None
+                        raise ProviderError("模型服务暂时不可用，请稍后重试", "provider_unavailable") from None
                     if response.status_code == 429:
                         # Token-window limits need a real pause, not a quick retry.
                         if attempt < 2:
                             await asyncio.sleep(self._retry_delay(response, 20.0, 60.0))
                             attempt += 1
                             continue
-                        raise ProviderError("模型服务限流，请稍后重试")
+                        raise ProviderError("模型服务限流，请稍后重试", "provider_rate_limited")
                     if response.status_code in {408, 409, 425} or response.status_code >= 500:
                         if attempt < 1:
                             await asyncio.sleep(5)
                             attempt += 1
                             continue
-                        raise ProviderError("模型服务暂时不可用，请稍后重试")
+                        raise ProviderError("模型服务暂时不可用，请稍后重试", "provider_unavailable")
                     if response.status_code >= 400:
-                        raise ProviderError("模型服务拒绝了请求，请检查本地配置")
+                        raise ProviderError("模型服务拒绝了请求，请检查本地配置", "provider_rejected")
                     break
             envelope = response.json()
             raw = envelope["choices"][0]["message"]["content"]
@@ -347,10 +368,12 @@ class ModelGateway:
             result = schema.model_validate(payload)
             success = True
             return result
-        except ProviderError:
+        except ProviderError as exc:
+            error_kind = exc.error_kind
             raise
         except (ValueError, TypeError, KeyError, IndexError, ValidationError):
-            raise ProviderError("模型响应格式不符合要求，请重试") from None
+            error_kind = "response_schema"
+            raise ProviderError("模型响应格式不符合要求，请重试", error_kind) from None
         finally:
             usage = {}
             if response is not None:
@@ -360,7 +383,7 @@ class ModelGateway:
                     pass
             # Truncated generations still drain the provider window; count any
             # usage the service reported, success or not.
-            self._note_usage(usage)
+            self._note_usage(profile, usage)
             event = {
                 "task": task,
                 "profile_id": profile.get("id"),
@@ -370,6 +393,8 @@ class ModelGateway:
                 "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
                 "success": success,
             }
+            if error_kind:
+                event["error_kind"] = error_kind
             if self.observer:
                 try:
                     observed = self.observer(event)

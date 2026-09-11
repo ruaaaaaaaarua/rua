@@ -19,6 +19,20 @@ def test_pending_diagnosis_does_not_become_confirmed(tmp_path):
     assert not store.knowledge()
 
 
+def test_call_record_omits_sensitive_error_details(tmp_path):
+    store = Store(tmp_path)
+    store.record_call({
+        'task': 'solve', 'profile_id': 'profile', 'model': 'model',
+        'success': False, 'error_kind': 'response_schema',
+        'prompt': 'private prompt', 'api_key': 'private key', 'raw_response': 'private response',
+    })
+
+    with store.connect() as db:
+        event = json.loads(db.execute('SELECT data FROM calls').fetchone()['data'])
+    assert event['error_kind'] == 'response_schema'
+    assert 'prompt' not in event and 'api_key' not in event and 'raw_response' not in event
+
+
 def test_disputed_quiz_cannot_update_knowledge(tmp_path):
     store=Store(tmp_path);s=store.create_session()
     s['messages']=[{'quiz':{'id':'quiz','disputed':True,'status':'ready','question':{'kind':'single'},'solution':{'answer':'B'}}}]
