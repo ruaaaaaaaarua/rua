@@ -9,6 +9,30 @@ export function questionProgress(questions = []) {
   }, { total: questions.length, answered: 0, confirmed: 0, correct: 0, pending: 0 })
 }
 
+const ANALYSIS_STAGES = {
+  recognizing: { active: true, title: '正在识别图片', detail: '正在提取题目、选项和你的作答。' },
+  extracted: { active: true, title: '题目已识别，正在独立解题', detail: '已显示识别内容；答案与诊断将随后补齐。' },
+  analyzing: { active: true, title: '正在独立解题与诊断', detail: '正在核对整页作答并整理简短反馈。' },
+}
+
+export const analysisStage = status => ANALYSIS_STAGES[status] || { active: false, title: '', detail: '' }
+export const shouldResumeAnalysis = status => status === 'extracted'
+export const analysisRunKey = session => `${session?.id || ''}:${(session?.questions || []).filter(q => !q.analysis).map(q => q.id).join(',')}`
+
+export function parseSseFrames(buffer) {
+  const events = []
+  let rest = buffer
+  while (rest.includes('\n\n')) {
+    const end = rest.indexOf('\n\n')
+    const frame = rest.slice(0, end)
+    rest = rest.slice(end + 2)
+    const type = frame.split('\n').find(line => line.startsWith('event:'))?.slice(6).trim()
+    const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n')
+    if (data) events.push({ type, data: JSON.parse(data) })
+  }
+  return { events, rest }
+}
+
 const KNOWLEDGE_STATES = {
   '待验证': { key: 'weak', label: '需要关注' },
   '待独立验证': { key: 'learning', label: '待独立验证' },

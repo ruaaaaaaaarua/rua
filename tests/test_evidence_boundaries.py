@@ -1,4 +1,5 @@
 import asyncio
+import json
 from app.store import Store
 from app.service import LearningService,public_session
 from tests.test_api import Gateway
@@ -146,3 +147,121 @@ def test_saved_reference_is_used_in_recheck(tmp_path):
     s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}]
     s['references']=[{'text':'参考页中的附加条件'}];store.save_session(s)
     asyncio.run(LearningService(store,lambda _:Reference()).recheck(s,'q','按刚上传的资料核查'))
+
+
+def _two_answered_questions():
+    base=asyncio.run(Gateway().extract([]))[0]
+    return [{**base,'id':'q1'}, {**base,'id':'q2','user_answer':'B'}]
+
+
+def test_batched_analysis_avoids_per_question_calls(tmp_path):
+    class Batched(Gateway):
+        solves=0
+        diagnose_items=[]
+        async def solve(self,q):
+            Batched.solves+=1; return await Gateway.solve(self,q)
+        async def solve_batch(self,questions):
+            return [dict(index=i,answer='B',explanation='平方关系',valid=True,status='confirmed') for i in range(len(questions))]
+        async def diagnose_batch(self,items):
+            type(self).diagnose_items=items
+            return [dict(index=it['index'],reasoning_ok=False,diagnosis='忽略平方',knowledge_point='功率与电压平方成正比',distinction='',hint='检查指数',error_type='formula_error',status='confirmed') for it in items]
+    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
+    gw=Batched()
+    service=LearningService(store,lambda _:gw)
+    service.related=lambda question:[{'id':str(index)} for index in range(4)]
+    result=asyncio.run(service.analyze(s))
+    assert Batched.solves==0
+    assert [q['analysis']['correct'] for q in result['questions']]==[False,True]
+    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
+    assert store.knowledge()[0]['evidence_count']==2
+    assert all(len(item['history'])==3 for item in Batched.diagnose_items)
+
+
+def test_batch_partial_results_fall_back_per_question(tmp_path):
+    class Partial(Gateway):
+        solves=0
+        async def solve_batch(self,questions):
+            return [dict(index=0,answer='B',explanation='平方关系',valid=True,status='confirmed')]
+        async def diagnose_batch(self,items):
+            return [dict(index=0,reasoning_ok=None,diagnosis='',knowledge_point='平方关系',distinction='',hint='检查指数',status='confirmed')]
+        async def solve(self,q):
+            Partial.solves+=1; return dict(answer='B',explanation='平方关系',valid=True)
+    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
+    gw=Partial()
+    result=asyncio.run(LearningService(store,lambda _:gw).analyze(s))
+    assert Partial.solves==1
+    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
+
+
+def test_extract_persists_questions_without_analysis_or_evidence(tmp_path):
+    class VisionOnly(Gateway):
+        extracts=solves=diagnoses=0
+        async def extract(self,images):
+            type(self).extracts+=1
+            return await Gateway.extract(self,images)
+        async def solve(self,question):
+            type(self).solves+=1
+            return await Gateway.solve(self,question)
+        async def diagnose(self,question,solution,history):
+            type(self).diagnoses+=1
+            return await Gateway.diagnose(self,question,solution,history)
+
+    store=Store(tmp_path);session=store.create_session()
+    store.attachments.joinpath('image').write_bytes(b'png')
+    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
+    store.save_session(session)
+
+    result=asyncio.run(LearningService(store,lambda _:VisionOnly()).extract(session))
+
+    assert result['status']=='extracted'
+    assert result['attachments'][0]['extracted'] is True
+    assert result['questions'] and 'analysis' not in result['questions'][0]
+    assert (VisionOnly.extracts,VisionOnly.solves,VisionOnly.diagnoses)==(1,0,0)
+    assert store.knowledge()==[]
+
+
+def test_stream_extract_persists_each_valid_question_before_done(tmp_path):
+    first=asyncio.run(Gateway().extract([]))[0]
+    second={**first,'number':'2','text':'第二题'}
+
+    class Streaming(Gateway):
+        async def stream_extract(self,images):
+            yield json.dumps({'type':'question','question':first},ensure_ascii=False)+'\n'
+            yield json.dumps({'type':'question','question':second},ensure_ascii=False)+'\n'
+            yield '{"type":"done"}\n'
+
+    store=Store(tmp_path);session=store.create_session()
+    store.attachments.joinpath('image').write_bytes(b'png')
+    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
+    store.save_session(session)
+
+    events=asyncio.run(_collect(LearningService(store,lambda _:Streaming()).extract_stream(session)))
+
+    assert [event['type'] for event in events]==['question','question','done']
+    assert len(session['questions'])==2
+    assert all('analysis' not in question for question in session['questions'])
+    assert session['status']=='extracted'
+    assert store.knowledge()==[]
+
+
+def test_stream_extract_accepts_a_final_ndjson_line_without_newline(tmp_path):
+    question=asyncio.run(Gateway().extract([]))[0]
+
+    class Streaming(Gateway):
+        async def stream_extract(self,images):
+            yield json.dumps({'type':'question','question':question},ensure_ascii=False)+'\n'
+            yield '{"type":"done"}'
+
+    store=Store(tmp_path);session=store.create_session()
+    store.attachments.joinpath('image').write_bytes(b'png')
+    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
+    store.save_session(session)
+
+    events=asyncio.run(_collect(LearningService(store,lambda _:Streaming()).extract_stream(session)))
+
+    assert [event['type'] for event in events]==['question','done']
+    assert session['status']=='extracted'
+
+
+async def _collect(events):
+    return [event async for event in events]

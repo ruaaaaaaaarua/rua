@@ -1,5 +1,6 @@
 """Local HTTP boundary; private data never needs a remote application server."""
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,7 +9,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .store import Store, TASKS, message, uid
@@ -217,6 +218,33 @@ def create_app(data_dir=None,gateway_factory=None):
 
     @app.post('/api/sessions/{sid}/analyze')
     async def analyze(sid:str):return await operation(sid,service.analyze)
+
+    @app.post('/api/sessions/{sid}/extract')
+    async def extract(sid:str):return await operation(sid,service.extract)
+
+    @app.post('/api/sessions/{sid}/extract-stream')
+    async def extract_stream(sid:str):
+        def sse(event):
+            return 'event: '+event['type']+'\ndata: '+json.dumps(event,ensure_ascii=False,separators=(',',':'))+'\n\n'
+
+        async def events():
+            try:
+                async with locked(sid) as s:
+                    try:
+                        async for event in service.extract_stream(s):
+                            yield sse(event)
+                    except ValueError as exc:
+                        s.update(status='error',error=str(exc));store.save_session(s)
+                        yield sse({'type':'error','message':str(exc)})
+                    except Exception as exc:
+                        from .providers import ProviderError
+                        safe=str(exc) if isinstance(exc,ProviderError) else '处理未完成，记录已保存。请检查模型配置后重试。'
+                        s.update(status='error',error=safe);store.save_session(s)
+                        yield sse({'type':'error','message':safe})
+            except HTTPException as exc:
+                yield sse({'type':'error','message':str(exc.detail)})
+
+        return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-store'})
 
     @app.post('/api/sessions/{sid}/messages')
     async def chat(sid:str,body:Text):return await operation(sid,lambda s:service.chat(s,body.text,body.question_id))

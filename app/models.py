@@ -72,6 +72,14 @@ class Solution(StrictModel):
         return self
 
 
+class BatchedSolution(Solution):
+    index: int = Field(ge=0)
+
+
+class BatchedSolutions(RootModel[List[BatchedSolution]]):
+    pass
+
+
 class Diagnosis(StrictModel):
     correct: Optional[bool]
     answer: Optional[Answer] = None
@@ -111,6 +119,14 @@ class Diagnosis(StrictModel):
         if self.status == "confirmed" and self.correct is None:
             raise ValueError("confirmed diagnosis must claim correctness")
         return self
+
+
+class BatchedDiagnosis(Diagnosis):
+    index: int = Field(ge=0)
+
+
+class BatchedDiagnoses(RootModel[List[BatchedDiagnosis]]):
+    pass
 
 
 class ChatAction(StrictModel):
