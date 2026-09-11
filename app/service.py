@@ -173,25 +173,28 @@ class LearningService:
         diagnoses={}
         batch_diagnose=getattr(gateway,'diagnose_batch',None)
         if diag_input and callable(batch_diagnose):
-            try:
-                for item in await batch_diagnose(diag_input): diagnoses[item['index']]=item
-            except ProviderError: diagnoses={}
-            except Exception: raise
+            async def diagnose_batch_with_retry():
+                for attempt in range(2):
+                    try: return await batch_diagnose(diag_input)
+                    except ProviderError:
+                        if attempt: return []
+
+            for item in await diagnose_batch_with_retry(): diagnoses[item['index']]=item
         remaining=[]
         for i,q in enumerate(pending):
             if i in solutions and i in diagnoses:
                 merge(q,solutions[i],diagnoses[i]); self.store.save_session(s)
-            else: remaining.append(q)
+            else: remaining.append((q,solutions.get(i)))
 
         # Fresh provider accounts allow a single in-flight request; parallel
         # starts trip concurrency 429s for every call in the burst.
         parallel=int(self.store.settings().get('parallel') or 1)
         semaphore=asyncio.Semaphore(parallel)
 
-        async def diagnose_question(q):
+        async def diagnose_question(q,solution=None):
             try:
                 async with semaphore:
-                    solution=await gateway.solve(q)
+                    if solution is None: solution=await gateway.solve(q)
                     diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
                 return q,solution,diagnosis,None
             except Exception as e:
@@ -199,8 +202,8 @@ class LearningService:
                 return q,None,None,str(e)
 
         tasks=[]
-        for index,q in enumerate(remaining):
-            tasks.append(asyncio.ensure_future(diagnose_question(q)))
+        for index,(q,solution) in enumerate(remaining):
+            tasks.append(asyncio.ensure_future(diagnose_question(q,solution)))
             if parallel>1 and index<len(remaining)-1:
                 await asyncio.sleep(1.5)
         for future in asyncio.as_completed(tasks):

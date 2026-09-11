@@ -2,6 +2,7 @@ import asyncio
 import json
 from app.store import Store
 from app.service import LearningService,public_session
+from app.providers import ProviderError
 from tests.test_api import Gateway
 
 
@@ -190,6 +191,30 @@ def test_batch_partial_results_fall_back_per_question(tmp_path):
     gw=Partial()
     result=asyncio.run(LearningService(store,lambda _:gw).analyze(s))
     assert Partial.solves==1
+    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
+
+
+def test_batch_diagnosis_failure_reuses_batch_solutions(tmp_path):
+    class DiagnosisFails(Gateway):
+        batch_diagnoses=single_solves=single_diagnoses=0
+        async def solve_batch(self,questions):
+            return [dict(index=i,answer='B',explanation='平方关系',valid=True,status='confirmed') for i in range(len(questions))]
+        async def diagnose_batch(self,items):
+            type(self).batch_diagnoses+=1
+            raise ProviderError('批量诊断暂时不可用')
+        async def solve(self,q):
+            type(self).single_solves+=1
+            return await super().solve(q)
+        async def diagnose(self,*args):
+            type(self).single_diagnoses+=1
+            return await super().diagnose(*args)
+
+    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
+    gateway=DiagnosisFails()
+    result=asyncio.run(LearningService(store,lambda _:gateway).analyze(s))
+    assert DiagnosisFails.single_solves==0
+    assert DiagnosisFails.batch_diagnoses==2
+    assert DiagnosisFails.single_diagnoses==2
     assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
 
 
