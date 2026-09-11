@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { analysisRunKey, analysisStage, groupKnowledge, knowledgeState, parseSseFrames, questionProgress, shouldResumeAnalysis } from './domain.js'
+import { analysisRunKey, analysisStage, clampConversationHeight, groupKnowledge, knowledgeState, parseSseFrames, questionProgress, savedConversationHeight, shouldResumeAnalysis } from './domain.js'
+
+describe('conversation height', () => {
+  it('clamps the panel between its usable minimum and viewport maximum', () => {
+    expect(clampConversationHeight(20, 900)).toBe(156)
+    expect(clampConversationHeight(2000, 900)).toBe(660)
+  })
+
+  it('loads and clamps a saved panel height', () => {
+    expect(savedConversationHeight({ getItem: () => '220' }, 900)).toBe(220)
+  })
+})
 
 describe('questionProgress', () => {
   it('counts confirmed, pending and unanswered questions', () => {

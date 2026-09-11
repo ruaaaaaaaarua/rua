@@ -9,6 +9,22 @@ export function questionProgress(questions = []) {
   }, { total: questions.length, answered: 0, confirmed: 0, correct: 0, pending: 0 })
 }
 
+const MIN_CONVERSATION_HEIGHT = 156
+const DEFAULT_CONVERSATION_HEIGHT = 240
+const CONVERSATION_REST_HEIGHT = 240
+
+export function clampConversationHeight(value, viewportHeight) {
+  const height = Number(value)
+  const viewport = Number(viewportHeight)
+  const maximum = Math.max(MIN_CONVERSATION_HEIGHT, viewport - CONVERSATION_REST_HEIGHT)
+  return Math.round(Math.min(Math.max(Number.isFinite(height) ? height : DEFAULT_CONVERSATION_HEIGHT, MIN_CONVERSATION_HEIGHT), maximum))
+}
+
+export function savedConversationHeight(storage, viewportHeight) {
+  const saved = storage?.getItem?.('grid-learning.conversation-height')
+  return clampConversationHeight(saved ?? DEFAULT_CONVERSATION_HEIGHT, viewportHeight)
+}
+
 const ANALYSIS_STAGES = {
   recognizing: { active: true, title: '正在识别图片', detail: '正在提取题目、选项和你的作答。' },
   extracted: { active: true, title: '题目已识别，正在独立解题', detail: '已显示识别内容；答案与诊断将随后补齐。' },
