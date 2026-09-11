@@ -5,6 +5,7 @@ describe('conversation height', () => {
   it('clamps the panel between its usable minimum and viewport maximum', () => {
     expect(clampConversationHeight(20, 900)).toBe(156)
     expect(clampConversationHeight(2000, 900)).toBe(660)
+    expect(clampConversationHeight(660, 500)).toBe(260)
   })
 
   it('loads and clamps a saved panel height', () => {

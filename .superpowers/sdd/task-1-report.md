@@ -77,3 +77,25 @@ git diff --check
 Result: clean.
 
 The fix catches storage getter/read/write exceptions, retains the in-memory clamped height, and adds `aria-valuemin`, `aria-valuemax`, and `aria-valuenow` to the separator.
+
+## Follow-up responsive clamp fix
+
+Changed files: `web/src/App.jsx`, `web/src/domain.test.js`.
+
+Focused test command:
+
+```text
+npm test -- --run
+```
+
+The added regression assertion (`clampConversationHeight(660, 500) === 260`) was already green because the domain clamp was implemented in the prior fix; the UI resize-listener behavior is covered by the implementation and the existing pure clamp contract.
+
+Final verification:
+
+```text
+npm test -- --run && npm run build && git diff --check
+```
+
+Result: 1 test file / 10 tests passed, Vite production build completed successfully, and `git diff --check` was clean. The build emitted only the existing large-chunk warning.
+
+The `Conversation` component now re-clamps its in-memory height on window resize and removes the listener on unmount, keeping `aria-valuenow` within `aria-valuemax`.
