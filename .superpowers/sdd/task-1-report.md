@@ -49,3 +49,31 @@ Result: clean.
 ## Concerns
 
 No blocking concerns. The production build reports the pre-existing bundle-size warning for the main JavaScript chunk.
+
+## Follow-up storage/accessibility fix
+
+Changed files: `web/src/domain.js`, `web/src/domain.test.js`, `web/src/App.jsx`.
+
+RED command and output:
+
+```text
+npm test -- --run
+```
+
+Result: 1 failed, 9 passed. The new throwing-storage test failed with `Error: storage unavailable`, proving the read path was not guarded.
+
+GREEN verification commands and output:
+
+```text
+npm test -- --run && npm run build
+```
+
+Result: Vitest passed 1 file / 10 tests. Vite production build completed successfully; it emitted only the existing large-chunk warning.
+
+```text
+git diff --check
+```
+
+Result: clean.
+
+The fix catches storage getter/read/write exceptions, retains the in-memory clamped height, and adds `aria-valuemin`, `aria-valuemax`, and `aria-valuenow` to the separator.

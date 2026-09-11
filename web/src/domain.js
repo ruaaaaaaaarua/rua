@@ -21,7 +21,12 @@ export function clampConversationHeight(value, viewportHeight) {
 }
 
 export function savedConversationHeight(storage, viewportHeight) {
-  const saved = storage?.getItem?.('grid-learning.conversation-height')
+  let saved
+  try {
+    saved = storage?.getItem?.('grid-learning.conversation-height')
+  } catch {
+    saved = null
+  }
   return clampConversationHeight(saved ?? DEFAULT_CONVERSATION_HEIGHT, viewportHeight)
 }
 

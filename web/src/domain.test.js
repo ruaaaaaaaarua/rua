@@ -10,6 +10,10 @@ describe('conversation height', () => {
   it('loads and clamps a saved panel height', () => {
     expect(savedConversationHeight({ getItem: () => '220' }, 900)).toBe(220)
   })
+
+  it('falls back to the default height when storage cannot be read', () => {
+    expect(savedConversationHeight({ getItem: () => { throw new Error('storage unavailable') } }, 900)).toBe(240)
+  })
 })
 
 describe('questionProgress', () => {
