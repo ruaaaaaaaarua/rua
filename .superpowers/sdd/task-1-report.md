@@ -99,3 +99,25 @@ npm test -- --run && npm run build && git diff --check
 Result: 1 test file / 10 tests passed, Vite production build completed successfully, and `git diff --check` was clean. The build emitted only the existing large-chunk warning.
 
 The `Conversation` component now re-clamps its in-memory height on window resize and removes the listener on unmount, keeping `aria-valuenow` within `aria-valuemax`.
+
+## Follow-up listener regression test
+
+Changed files: `web/src/domain.js`, `web/src/domain.test.js`, `web/src/App.jsx`.
+
+RED command and output:
+
+```text
+npm test -- --run
+```
+
+Result: 1 failed, 10 passed. The new fake-target listener test failed with `TypeError: bindConversationResize is not a function`, proving the test exercised a missing binding helper.
+
+GREEN verification commands and output:
+
+```text
+npm test -- --run && npm run build && git diff --check
+```
+
+Result: Vitest passed 1 file / 11 tests; Vite production build completed successfully; `git diff --check` was clean. The build emitted only the existing large-chunk warning.
+
+The extracted `bindConversationResize` helper is now used by `Conversation`; the fake target test verifies resize registration and callback clamping from 660px to 260px at a 500px viewport.

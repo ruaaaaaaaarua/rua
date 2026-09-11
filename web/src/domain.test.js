@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { analysisRunKey, analysisStage, clampConversationHeight, groupKnowledge, knowledgeState, parseSseFrames, questionProgress, savedConversationHeight, shouldResumeAnalysis } from './domain.js'
+import { analysisRunKey, analysisStage, bindConversationResize, clampConversationHeight, groupKnowledge, knowledgeState, parseSseFrames, questionProgress, savedConversationHeight, shouldResumeAnalysis } from './domain.js'
 
 describe('conversation height', () => {
   it('clamps the panel between its usable minimum and viewport maximum', () => {
@@ -14,6 +14,19 @@ describe('conversation height', () => {
 
   it('falls back to the default height when storage cannot be read', () => {
     expect(savedConversationHeight({ getItem: () => { throw new Error('storage unavailable') } }, 900)).toBe(240)
+  })
+
+  it('re-clamps the current height when the viewport resize callback runs', () => {
+    let callback
+    let nextHeight
+    const target = {
+      innerHeight: 500,
+      addEventListener: (type, listener) => { if (type === 'resize') callback = listener },
+      removeEventListener: () => {},
+    }
+    bindConversationResize(target, updater => { nextHeight = updater(660) })
+    callback()
+    expect(nextHeight).toBe(260)
   })
 })
 

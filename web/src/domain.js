@@ -30,6 +30,12 @@ export function savedConversationHeight(storage, viewportHeight) {
   return clampConversationHeight(saved ?? DEFAULT_CONVERSATION_HEIGHT, viewportHeight)
 }
 
+export function bindConversationResize(target, setHeight) {
+  const reclamp = () => setHeight(current => clampConversationHeight(current, target.innerHeight))
+  target.addEventListener('resize', reclamp)
+  return () => target.removeEventListener('resize', reclamp)
+}
+
 const ANALYSIS_STAGES = {
   recognizing: { active: true, title: '正在识别图片', detail: '正在提取题目、选项和你的作答。' },
   extracted: { active: true, title: '题目已识别，正在独立解题', detail: '已显示识别内容；答案与诊断将随后补齐。' },

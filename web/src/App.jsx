@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { api } from './api.js'
-import { analysisRunKey, analysisStage, clampConversationHeight, groupKnowledge, knowledgeState, questionProgress, savedConversationHeight, shouldResumeAnalysis } from './domain.js'
+import { analysisRunKey, analysisStage, bindConversationResize, clampConversationHeight, groupKnowledge, knowledgeState, questionProgress, savedConversationHeight, shouldResumeAnalysis } from './domain.js'
 
 const TASK_LABELS = { vision: '图片理解与局部复核', solve: '独立解题与诊断', chat: '解释与自由追问', generate: '变式生成', verify: '变式复核' }
 const PURPOSES = { variant: '最小变式', prerequisite: '验证基础', depth: '深入测试', verify: '验证一下' }
@@ -67,11 +67,7 @@ function Conversation({ session, selectedId, busy, run, onUpdate }) {
     try { return savedConversationHeight(window.localStorage, window.innerHeight) } catch { return savedConversationHeight(null, window.innerHeight) }
   })
   const resizeStart = useRef(null)
-  useEffect(() => {
-    const reclamp = () => setHeight(current => clampConversationHeight(current, window.innerHeight))
-    window.addEventListener('resize', reclamp)
-    return () => window.removeEventListener('resize', reclamp)
-  }, [])
+  useEffect(() => bindConversationResize(window, setHeight), [])
   const send = async () => { if (text.trim() && await run(() => api.message(session.id, { text, question_id: selectedId || session.selected_question_id || undefined }), onUpdate)) setText('') }
   const saveHeight = next => { const value = clampConversationHeight(next, window.innerHeight); setHeight(value); try { window.localStorage.setItem('grid-learning.conversation-height', String(value)) } catch {} return value }
   const startResize = event => { event.preventDefault(); resizeStart.current = { y: event.clientY, height }; const move = next => setHeight(clampConversationHeight(resizeStart.current.height + resizeStart.current.y - next.clientY, window.innerHeight)); const finish = next => { if (next) saveHeight(resizeStart.current.height + resizeStart.current.y - next.clientY); else saveHeight(height); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish); resizeStart.current = null }; window.addEventListener('pointermove', move); window.addEventListener('pointerup', finish); window.addEventListener('pointercancel', finish) }
