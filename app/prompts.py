@@ -26,11 +26,50 @@ def extraction_prompt(names: Iterable[str]) -> str:
     )
 
 
+def stream_extraction_prompt(names: Iterable[str]) -> str:
+    return (
+        "识别图片中的题目和学生作答痕迹，不要判分或解题。"
+        "不要 Markdown、解释或代码围栏。每识别完一题立刻单独输出一行 NDJSON："
+        '{"type":"question","question":{"kind":"single|multiple|judge","text":"题干","options":[{"key":"A","text":"选项内容"}],"user_answer":"",'
+        '"reasoning":"","confidence":"certain|unsure|guess|unknown","subject":"学科","chapter":"章节","knowledge":"知识点"}}。'
+        '全部题目完成后单独输出一行 {"type":"done"}。每个 question 必须包含完整字段；subject、chapter、knowledge 均必须为非空的简短名称。'
+        '仅在题目或作答无法可靠转写时才写 recognition_note；不确定作答可用空字符串或 unknown，仍继续下一题。图片名：'
+        + _json(list(names))
+    )
+
+
 def solve_prompt(question: Dict[str, Any]) -> str:
     return (
         "独立解题。不得推测或迎合学生答案。若有 reference_note，将其作为待核验参考资料。"
         "只输出 JSON：answer, explanation, valid, status(confirmed/pending)。题目："
         + _json(independent_question(question, allow_reference=True))
+    )
+
+
+def solve_batch_prompt(questions: list) -> str:
+    return (
+        "逐题独立解题，不得推测或迎合学生答案，题目之间互不影响。"
+        "只输出 JSON 数组，第 i 项对应输入第 i 题（index 从 0 起），"
+        "每项字段：index,answer,explanation,valid,status(confirmed/pending)。"
+        "explanation 只写一至两句关键依据，不展开推导。"
+        "个别题目无法可靠作答时仅该题 status=pending，其余照常。题目："
+        + _json([independent_question(q) for q in questions])
+    )
+
+
+def diagnosis_batch_prompt(items: list) -> str:
+    return (
+        "依据各题独立解答诊断学生作答，包括按含义评判简答题，禁止仅做字符串相等比较。"
+        "只输出 JSON 数组，第 i 项对应输入第 i 题（index 从 0 起）。"
+        "每项字段：index,correct,answer,knowledge_point,diagnosis,distinction,hint,"
+        "reasoning_ok,error_type,status,source；diagnosis 或 distinction 可为空字符串。"
+        "仅当题目或答案本身确有歧义、无法可靠判断时该题 correct=null 且 status=pending；"
+        "学生未写推理只令 reasoning_ok=null，不得因此把 correct 设为 null 或 pending。"
+        "没有学生推理时不得臆测具体错误原因。knowledge_point 用一句话；diagnosis 和 distinction "
+        "各限一至两句短句，默认不写长篇解释；hint 只给下一步，绝不泄露最终答案。"
+        "error_type 使用 concept_error/calculation_error/formula_error/unit_error/reasoning_error/"
+        "reading_error/memory_error/careless_error/answer_only/insufficient_information/unknown。材料："
+        + _json(items)
     )
 
 

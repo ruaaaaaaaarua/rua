@@ -9,19 +9,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "lucide-react": "latest",
-    "react-markdown": "latest",
-    "remark-gfm": "latest",
-    "remark-math": "latest",
-    "rehype-katex": "latest",
-    "katex": "latest"
+    "@vitejs/plugin-react": "6.1.1",
+    "vite": "8.2.2",
+    "typescript": "7.0.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "lucide-react": "1.43.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "rehype-katex": "7.0.1",
+    "katex": "0.18.7"
   },
   "devDependencies": {
-    "vitest": "latest"
+    "vitest": "5.0.0"
   }
 }

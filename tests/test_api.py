@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 from app.main import create_app
 
@@ -5,6 +7,10 @@ class Gateway:
     solves=0
     async def extract(self,images):
         return [dict(number='1',kind='single',text='电压翻倍，其他条件不变，功率变化？',options=[dict(key='A',text='2倍'),dict(key='B',text='4倍')],user_answer='A',reasoning='一次关系',confidence='unsure',subject='电力系统分析',chapter='线路',knowledge='自然功率')]
+    async def stream_extract(self,images):
+        for question in await self.extract(images):
+            yield json.dumps({'type':'question','question':question},ensure_ascii=False)+'\n'
+        yield '{"type":"done"}\n'
     async def solve(self,q):
         self.solves+=1
         return dict(answer='B',explanation='平方关系',valid=True)
@@ -42,6 +48,43 @@ def test_real_flow_hint_persistence_and_manual_training(tmp_path):
     assert c.post(f'/api/sessions/{sid}/quiz/{quiz["id"]}/answer',json={'answer':'A'}).status_code==400
     c.patch(f'/api/sessions/{sid}/questions/{q["id"]}',json={'user_answer':'B'})
     assert c.get('/api/knowledge').json()==[] # including dependent quiz evidence revoked
+
+
+def test_extract_endpoint_returns_questions_before_analysis(tmp_path):
+    c,g=client(tmp_path)
+    session=c.post('/api/sessions',json={}).json();sid=session['id']
+    assert c.post(f'/api/sessions/{sid}/upload',files={
+        'files':('page.png',b'\x89PNG\r\n\x1a\nbody','image/png')
+    }).status_code==200
+
+    extracted=c.post(f'/api/sessions/{sid}/extract')
+    assert extracted.status_code==200,extracted.text
+    data=extracted.json()
+    assert data['status']=='extracted'
+    assert data['questions'] and 'analysis' not in data['questions'][0]
+    assert g.solves==0
+
+    analyzed=c.post(f'/api/sessions/{sid}/analyze')
+    assert analyzed.status_code==200,analyzed.text
+    assert analyzed.json()['status']=='ready'
+    assert analyzed.json()['questions'][0]['analysis']['status']=='confirmed'
+    assert g.solves==1
+
+
+def test_extract_stream_endpoint_emits_questions_before_done(tmp_path):
+    c,g=client(tmp_path)
+    session=c.post('/api/sessions',json={}).json();sid=session['id']
+    assert c.post(f'/api/sessions/{sid}/upload',files={
+        'files':('page.png',b'\x89PNG\r\n\x1a\nbody','image/png')
+    }).status_code==200
+
+    streamed=c.post(f'/api/sessions/{sid}/extract-stream')
+    assert streamed.status_code==200,streamed.text
+    assert 'text/event-stream' in streamed.headers['content-type']
+    assert streamed.text.index('event: question') < streamed.text.index('event: done')
+    saved=c.get(f'/api/sessions/{sid}').json()
+    assert saved['status']=='extracted'
+    assert saved['questions'] and 'analysis' not in saved['questions'][0]
 
 
 def test_settings_redaction_and_validation(tmp_path):

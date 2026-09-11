@@ -1,4 +1,5 @@
 """Learning orchestration; model outputs are proposals, not mutations."""
+import asyncio
 import base64
 import copy
 import json
@@ -55,11 +56,72 @@ class LearningService:
                  k['name'].replace(' ','').casefold()==name.replace(' ','').casefold()]
         if matches: q.update(knowledge=matches[0]['name'],chapter=matches[0]['chapter'])
 
-    async def analyze(self,s):
+    async def extract_stream(self,s):
+        from .models import ExtractedQuestion
+        from .providers import ProviderError
+
+        if s.get('demo'): return
+        if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+        pending=[a for a in s['attachments'] if not a.get('reference') and not a.get('extracted') and not a.get('deleted')]
+        if not pending:
+            s.update(status='extracted',error=None); self.store.save_session(s)
+            yield {'type':'done'}
+            return
+        s.update(status='recognizing',error=None); self.store.save_session(s)
+        gateway=self.gateway()
+        saved=0
+        for attachment in pending:
+            blob=(self.store.attachments/attachment['id']).read_bytes()
+            data='data:'+attachment['mime']+';base64,'+base64.b64encode(blob).decode()
+            buffer=''; complete=False
+
+            def parse_line(line):
+                try: event=json.loads(line)
+                except (TypeError,ValueError): raise ProviderError('模型流式识别格式不符合要求，请重试') from None
+                if event.get('type')=='done': return None
+                if event.get('type')!='question':
+                    raise ProviderError('模型流式识别格式不符合要求，请重试')
+                try: return ExtractedQuestion.model_validate(event.get('question')).model_dump()
+                except Exception: raise ProviderError('模型流式识别格式不符合要求，请重试') from None
+
+            async for part in gateway.stream_extract([dict(data_url=data,name=attachment['name'])]):
+                buffer+=part
+                while '\n' in buffer:
+                    line,buffer=buffer.split('\n',1); line=line.strip()
+                    if not line: continue
+                    if complete:
+                        raise ProviderError('模型流式识别格式不符合要求，请重试')
+                    question=parse_line(line)
+                    if question is None:
+                        complete=True; continue
+                    question.update(id=uid(),attachment_id=attachment['id'],revealed=False)
+                    self.canonicalize(question); s['questions'].append(question)
+                    self.store.save_session(s); saved+=1
+                    yield {'type':'question','question':question}
+            if buffer.strip():
+                if complete:
+                    raise ProviderError('模型流式识别格式不符合要求，请重试')
+                question=parse_line(buffer.strip())
+                buffer=''
+                if question is None:
+                    complete=True
+                else:
+                    question.update(id=uid(),attachment_id=attachment['id'],revealed=False)
+                    self.canonicalize(question); s['questions'].append(question)
+                    self.store.save_session(s); saved+=1
+                    yield {'type':'question','question':question}
+            if buffer.strip() or not complete:
+                raise ProviderError('模型流式识别未完整结束，请重试')
+            attachment['extracted']=True; self.store.save_session(s)
+        if not saved: raise ProviderError('未识别到题目，请确认图片清晰且包含完整题目')
+        s.update(status='extracted',error=None); self.store.save_session(s)
+        yield {'type':'done'}
+
+    async def extract(self,s):
         if s.get('demo'): return s
         if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+        s.update(status='recognizing',error=None); self.store.save_session(s)
         gateway=self.gateway()
-        s.update(status='analyzing',error=None); self.store.save_session(s)
         # Each successfully extracted attachment remains cached after failures.
         for a in s['attachments']:
             if a.get('reference') or a.get('extracted') or a.get('deleted'): continue
@@ -72,25 +134,82 @@ class LearningService:
                 s['questions'].append(q)
             a['extracted']=True
             self.store.save_session(s)
+        s.update(status='extracted',error=None); self.store.save_session(s)
+        return s
+
+    async def analyze(self,s):
+        if s.get('demo'): return s
+        if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+        if any(not a.get('reference') and not a.get('extracted') and not a.get('deleted') for a in s['attachments']):
+            await self.extract(s)
+        gateway=self.gateway()
+        s.update(status='analyzing',error=None); self.store.save_session(s)
         failures=[]
-        for q in s['questions']:
-            if q.get('analysis',{}).get('status')=='confirmed': continue
+        pending=[q for q in s['questions'] if q.get('analysis',{}).get('status')!='confirmed']
+
+        def merge(q,solution,diagnosis):
+            answer=solution.get('answer','')
+            valid=solution.get('valid',True) and solution.get('status','confirmed')!='pending' and diagnosis.get('status','confirmed')!='pending' and bool(answer)
+            supplied=bool(str(q.get('user_answer') or '').strip())
+            correct=normalized_answer(q.get('user_answer'),q['kind'])==normalized_answer(answer,q['kind']) if valid and supplied else None
+            q['analysis']={**diagnosis,'answer':answer,'explanation':solution.get('explanation',''),
+                'correct':correct,'status':'confirmed' if valid and supplied else 'pending','source':'ai'}
+            q['solution']=solution
+            self.store.record_evidence(s['id'],q)
+
+        # One batched solve plus one batched diagnose replaces 2N calls; on
+        # rate-limited accounts that is the difference between minutes and tens of minutes.
+        from .providers import ProviderError
+        solutions={}
+        batch_solve=getattr(gateway,'solve_batch',None)
+        if pending and callable(batch_solve):
             try:
-                solution=await gateway.solve(q)
-                diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
-                answer=solution.get('answer','')
-                valid=solution.get('valid',True) and solution.get('status','confirmed')!='pending' and diagnosis.get('status','confirmed')!='pending' and bool(answer)
-                supplied=bool(str(q.get('user_answer') or '').strip())
-                correct=normalized_answer(q.get('user_answer'),q['kind'])==normalized_answer(answer,q['kind']) if valid and supplied else None
-                q['analysis']={**diagnosis,'answer':answer,'explanation':solution.get('explanation',''),
-                    'correct':correct,'status':'confirmed' if valid and supplied else 'pending','source':'ai'}
-                q['solution']=solution
-                self.store.record_evidence(s['id'],q)
+                for item in await batch_solve(pending): solutions[item['index']]=item
+            except ProviderError: solutions={}
+            except Exception: raise
+        diag_input=[dict(index=i,question={**q,'reference_material':s.get('references',[])[-5:]},
+            independent_solution={k:solutions[i][k] for k in ('answer','explanation','valid','status')},
+            history=self.related(q)[:3]) for i,q in enumerate(pending) if i in solutions]
+        diagnoses={}
+        batch_diagnose=getattr(gateway,'diagnose_batch',None)
+        if diag_input and callable(batch_diagnose):
+            try:
+                for item in await batch_diagnose(diag_input): diagnoses[item['index']]=item
+            except ProviderError: diagnoses={}
+            except Exception: raise
+        remaining=[]
+        for i,q in enumerate(pending):
+            if i in solutions and i in diagnoses:
+                merge(q,solutions[i],diagnoses[i]); self.store.save_session(s)
+            else: remaining.append(q)
+
+        # Fresh provider accounts allow a single in-flight request; parallel
+        # starts trip concurrency 429s for every call in the burst.
+        parallel=int(self.store.settings().get('parallel') or 1)
+        semaphore=asyncio.Semaphore(parallel)
+
+        async def diagnose_question(q):
+            try:
+                async with semaphore:
+                    solution=await gateway.solve(q)
+                    diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
+                return q,solution,diagnosis,None
             except Exception as e:
-                from .providers import ProviderError
                 if not isinstance(e,ProviderError): raise
+                return q,None,None,str(e)
+
+        tasks=[]
+        for index,q in enumerate(remaining):
+            tasks.append(asyncio.ensure_future(diagnose_question(q)))
+            if parallel>1 and index<len(remaining)-1:
+                await asyncio.sleep(1.5)
+        for future in asyncio.as_completed(tasks):
+            q,solution,diagnosis,error=await future
+            if error:
                 failures.append(str(q.get('number','')))
-                q['analysis']=dict(correct=None,status='pending',source='ai',diagnosis=str(e),knowledge_point='',hint='请核对题目信息后重试。')
+                q['analysis']=dict(correct=None,status='pending',source='ai',diagnosis=error,knowledge_point='',hint='请核对题目信息后重试。')
+            else:
+                merge(q,solution,diagnosis)
             self.store.save_session(s)
         s.update(status='error' if failures else 'ready',error='部分题目未能完成分析，可重试：'+ '、'.join(failures) if failures else None)
         if not any(m['type']=='overview' for m in s['messages']):

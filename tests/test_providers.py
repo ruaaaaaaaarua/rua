@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.providers import ModelGateway, ProviderError
+from app.prompts import diagnosis_batch_prompt, solve_batch_prompt, stream_extraction_prompt
 
 
 @pytest.fixture
@@ -37,6 +38,18 @@ def settings(api_key="secret-key"):
             "verify": "text-profile",
         },
     }
+
+
+def test_stream_extraction_prompt_declares_complete_question_shape():
+    prompt = stream_extraction_prompt(["page.png"])
+    assert '"options":[{"key":"A","text":"选项内容"}]' in prompt
+    assert 'subject、chapter、knowledge 均必须为非空的简短名称' in prompt
+    assert '仅在题目或作答无法可靠转写时才写 recognition_note' in prompt
+
+
+def test_batch_prompts_request_concise_output_without_unused_diagnosis_explanation():
+    assert '一至两句' in solve_batch_prompt([])
+    assert 'explanation' not in diagnosis_batch_prompt([])
 
 
 def response(payload, status=200):
@@ -350,3 +363,118 @@ async def test_answers_are_normalized_and_observer_gets_safe_usage():
     }]
     assert observed[0]["duration_ms"] >= 0
     assert "api_key" not in observed[0] and "prompt" not in observed[0]
+
+
+@pytest.mark.anyio
+async def test_solve_batch_prompt_redacts_student_work():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return response([{"index": 0, "answer": "B", "explanation": "平方", "valid": True, "status": "confirmed"}])
+
+    config = settings(); config["profiles"][1]["model"] = "glm-5.3-flash"
+    gateway = ModelGateway(config, httpx.MockTransport(handler))
+    items = await gateway.solve_batch(
+        [
+            {
+                "text": "电压翻倍，功率？",
+                "kind": "single",
+                "options": [{"key": "A", "text": "2倍"}, {"key": "B", "text": "4倍"}],
+                "user_answer": "A",
+                "reasoning": "我猜一次关系",
+                "confidence": "guess",
+            }
+        ]
+    )
+    assert items == [{"index": 0, "answer": "B", "explanation": "平方", "valid": True, "status": "confirmed"}]
+    assert "thinking" not in captured["body"]
+    assert captured["body"]["reasoning_effort"] == "low"
+    assert captured["body"]["max_tokens"] == 4096
+    content = captured["body"]["messages"][1]["content"]
+    assert "user_answer" not in content and "我猜一次关系" not in content and "guess" not in content
+
+
+@pytest.mark.anyio
+async def test_solve_batch_drops_items_with_invalid_answers():
+    def handler(request):
+        return response(
+            [
+                {"index": 0, "answer": "B", "explanation": "平方", "valid": True, "status": "confirmed"},
+                {"index": 1, "answer": "Z", "explanation": "越界选项", "valid": True, "status": "confirmed"},
+            ]
+        )
+
+    gateway = ModelGateway(settings(), httpx.MockTransport(handler))
+    question = {
+        "text": "题",
+        "kind": "single",
+        "options": [{"key": "A", "text": "1"}, {"key": "B", "text": "2"}],
+    }
+    items = await gateway.solve_batch([question, dict(question)])
+    assert [item["index"] for item in items] == [0]
+
+
+@pytest.mark.anyio
+async def test_diagnose_batch_maps_results_by_index():
+    captured = {}
+
+    def handler(request):
+        captured.update(json.loads(request.content))
+        return response(
+            [
+                {
+                    "index": 1,
+                    "correct": True,
+                    "knowledge_point": "平方关系",
+                    "diagnosis": "",
+                    "distinction": "",
+                    "hint": "检查指数",
+                    "reasoning_ok": None,
+                    "status": "confirmed",
+                }
+            ]
+        )
+
+    config = settings(); config["profiles"][1]["model"] = "glm-5.3-flash"
+    gateway = ModelGateway(config, httpx.MockTransport(handler))
+    items = await gateway.diagnose_batch(
+        [
+            {"index": 0, "question": {"kind": "single"}, "independent_solution": {"answer": "B"}},
+            {"index": 1, "question": {"kind": "single"}, "independent_solution": {"answer": "B"}},
+        ]
+    )
+    assert [item["index"] for item in items] == [1]
+    assert "thinking" not in captured
+    assert captured["reasoning_effort"] == "low"
+    assert captured["max_tokens"] == 4096
+
+
+@pytest.mark.anyio
+async def test_stream_extract_disables_thinking_and_yields_delta_content():
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+                b'data: {"choices":[{"delta":{"content":" two"}}]}\n\n'
+                b'data: [DONE]\n\n'
+            ),
+        )
+
+    gateway = ModelGateway(settings(), httpx.MockTransport(handler))
+    chunks = [
+        part
+        async for part in gateway.stream_extract(
+            [{"name": "q.png", "data_url": "data:image/png;base64,AA=="}]
+        )
+    ]
+
+    assert chunks == ["one", " two"]
+    assert seen["stream"] is True
+    assert seen["thinking"] == {"type": "disabled"}
+    assert seen["max_tokens"] == 8192
