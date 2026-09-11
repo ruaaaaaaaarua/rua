@@ -1,3 +1,4 @@
+import asyncio
 import json
 import inspect
 import time
@@ -39,10 +40,35 @@ TASK_LIMITS = {
 
 
 class ModelGateway:
+    # Fresh provider accounts cap tokens per minute; a whole-page vision
+    # transcription drains that window and starves the solving phase.
+    RATE_WINDOW = 60.0
+    DEFAULT_RATE_BUDGET = 15000
+
     def __init__(self, settings: Dict[str, Any], transport=None):
         self.settings = settings
         self.transport = transport
         self.observer = None
+        self.rate_budget = int(settings.get("rate_tpm") or self.DEFAULT_RATE_BUDGET)
+        self._usage_events: list = []
+
+    async def _await_token_budget(self) -> None:
+        while self._usage_events:
+            now = time.monotonic()
+            self._usage_events = [
+                (at, tokens)
+                for at, tokens in self._usage_events
+                if now - at < self.RATE_WINDOW
+            ]
+            if sum(tokens for _, tokens in self._usage_events) < self.rate_budget:
+                return
+            oldest = self._usage_events[0][0]
+            await asyncio.sleep(min(62.0, max(2.0, self.RATE_WINDOW - (now - oldest) + 2.0)))
+
+    def _note_usage(self, usage: Dict[str, Any]) -> None:
+        tokens = usage.get("completion_tokens") or 0
+        if tokens:
+            self._usage_events.append((time.monotonic(), tokens))
 
     async def extract(self, images: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         content: List[Dict[str, Any]] = [
@@ -54,6 +80,14 @@ class ModelGateway:
         if not result.root:
             raise ProviderError("未识别到题目，请确认图片清晰且包含完整题目")
         return [item.model_dump() for item in result.root]
+
+    @staticmethod
+    def _retry_delay(response, floor: float = 5.0, ceiling: float = 30.0) -> float:
+        header = response.headers.get("retry-after", "")
+        try:
+            return max(floor, min(ceiling, float(header)))
+        except ValueError:
+            return min(ceiling, max(floor, 12.0))
 
     @staticmethod
     def _unwrap_root(payload: Any) -> Any:
@@ -141,6 +175,7 @@ class ModelGateway:
     async def _call(
         self, task: str, content: Any, schema: Type[BaseModel], coerce=None
     ) -> BaseModel:
+        await self._await_token_budget()
         profile = self._profile(task)
         started = time.monotonic()
         response = None
@@ -172,15 +207,28 @@ class ModelGateway:
         try:
             timeout = httpx.Timeout(limits["timeout"])
             async with httpx.AsyncClient(transport=self.transport, timeout=timeout) as client:
-                for attempt in range(2):
+                response = None
+                attempt = 0
+                while True:
                     try:
                         response = await client.post(url, headers=headers, json=body)
                     except (httpx.TimeoutException, httpx.NetworkError):
-                        if attempt == 0:
+                        if attempt < 1:
+                            await asyncio.sleep(5)
+                            attempt += 1
                             continue
                         raise ProviderError("模型服务暂时不可用，请稍后重试") from None
-                    if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
-                        if attempt == 0:
+                    if response.status_code == 429:
+                        # Token-window limits need a real pause, not a quick retry.
+                        if attempt < 2:
+                            await asyncio.sleep(self._retry_delay(response, 20.0, 60.0))
+                            attempt += 1
+                            continue
+                        raise ProviderError("模型服务限流，请稍后重试")
+                    if response.status_code in {408, 409, 425} or response.status_code >= 500:
+                        if attempt < 1:
+                            await asyncio.sleep(5)
+                            attempt += 1
                             continue
                         raise ProviderError("模型服务暂时不可用，请稍后重试")
                     if response.status_code >= 400:
@@ -205,6 +253,8 @@ class ModelGateway:
                     usage = response.json().get("usage") or {}
                 except (ValueError, TypeError):
                     pass
+            if success:
+                self._note_usage(usage)
             event = {
                 "task": task,
                 "profile_id": profile.get("id"),

@@ -77,6 +77,7 @@ class Settings(Input):
     profiles:List[Profile]=Field(max_length=20)
     tasks:Dict[str,str]
     mode:Literal['direct','hint']='direct'
+    rate_tpm:Optional[int]=Field(default=None,ge=1000,le=10000000)
 
     @field_validator('tasks')
     @classmethod
