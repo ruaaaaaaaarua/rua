@@ -179,6 +179,8 @@ class ModelGateway:
         )
         items: List[Dict[str, Any]] = []
         for item in result.root:
+            if item.index >= len(questions):
+                continue
             if item.valid and item.status == "confirmed" and item.index < len(questions):
                 try:
                     self._validate_answer(questions[item.index], item.answer)
@@ -254,6 +256,8 @@ class ModelGateway:
         self, result: BaseModel, questions: List[Dict[str, Any]]
     ) -> Optional[str]:
         for item in result.root:
+            if item.index >= len(questions):
+                return "response_schema"
             if item.valid and item.status == "confirmed" and item.index < len(questions):
                 error_kind = self._answer_error_kind(questions[item.index], item)
                 if error_kind:

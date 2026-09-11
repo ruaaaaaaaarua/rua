@@ -138,6 +138,26 @@ async def test_semantic_schema_rejections_record_failed_safe_telemetry():
 
 
 @pytest.mark.anyio
+async def test_out_of_range_batch_index_is_rejected_before_success_telemetry():
+    observed = []
+    gateway = ModelGateway(
+        settings(),
+        httpx.MockTransport(lambda request: response([
+            {"index": 1, "answer": "A", "explanation": "越界", "valid": True, "status": "confirmed"},
+        ])),
+    )
+    gateway.observer = observed.append
+
+    items = await gateway.solve_batch([{
+        "kind": "single", "text": "题", "options": [{"key": "A", "text": "甲"}],
+    }])
+
+    assert items == []
+    assert observed[-1]["success"] is False
+    assert observed[-1]["error_kind"] == "response_schema"
+
+
+@pytest.mark.anyio
 async def test_missing_api_key_fails_without_network_call():
     calls = 0
 

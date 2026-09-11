@@ -33,3 +33,16 @@ Independent review found no critical or important issues. Low-priority follow-up
 - `npm --prefix web test -- --run`: `11 passed`
 - `npm --prefix web run build`: passed (existing bundle-size advisory only)
 - `git diff --check`: passed
+
+## Final index-boundary follow-up
+
+- Nonnegative batched solution indices outside the submitted question range now become a `response_schema` telemetry failure before observer delivery and are omitted from returned batch results.
+- Added a focused regression for this boundary.
+
+### Final verification
+
+- Focused index regression plus related batch telemetry tests: `3 passed`
+- `./.venv/bin/pytest -q`: `62 passed`
+- `npm --prefix web test -- --run`: `11 passed`
+- `npm --prefix web run build`: passed (existing bundle-size advisory only)
+- `git diff --check`: passed
