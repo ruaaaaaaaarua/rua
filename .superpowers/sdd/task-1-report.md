@@ -37,7 +37,7 @@ Result: clean.
 
 ## Commit
 
-`01ba8ea70b7344ed8c76e9b009f3208598fe9fb0` (`feat: add resizable compact conversation panel`)
+`6edd0eeda5545525fea19dd4d1b27671f5fd844f` (`feat: add resizable compact conversation panel`)
 
 ## Self-review
 
