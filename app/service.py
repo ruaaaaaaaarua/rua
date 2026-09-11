@@ -74,8 +74,10 @@ class LearningService:
             a['extracted']=True
             self.store.save_session(s)
         failures=[]
-        # Low-burst parallel solving; provider rate limits reject simultaneous starts.
-        semaphore=asyncio.Semaphore(2)
+        # Fresh provider accounts allow a single in-flight request; parallel
+        # starts trip concurrency 429s for every call in the burst.
+        parallel=int(self.store.settings().get('parallel') or 1)
+        semaphore=asyncio.Semaphore(parallel)
 
         async def diagnose_question(q):
             try:
@@ -92,7 +94,7 @@ class LearningService:
         pending=[q for q in s['questions'] if q.get('analysis',{}).get('status')!='confirmed']
         for index,q in enumerate(pending):
             tasks.append(asyncio.ensure_future(diagnose_question(q)))
-            if index<len(pending)-1:
+            if parallel>1 and index<len(pending)-1:
                 await asyncio.sleep(1.5)
         for future in asyncio.as_completed(tasks):
             q,solution,diagnosis,error=await future

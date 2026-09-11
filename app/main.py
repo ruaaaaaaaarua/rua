@@ -78,6 +78,7 @@ class Settings(Input):
     tasks:Dict[str,str]
     mode:Literal['direct','hint']='direct'
     rate_tpm:Optional[int]=Field(default=None,ge=1000,le=10000000)
+    parallel:Optional[int]=Field(default=None,ge=1,le=8)
 
     @field_validator('tasks')
     @classmethod
