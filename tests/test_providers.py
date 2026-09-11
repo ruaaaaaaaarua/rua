@@ -96,6 +96,48 @@ async def test_response_schema_failure_records_safe_error_kind(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_semantic_schema_rejections_record_failed_safe_telemetry():
+    question = {
+        "kind": "single", "text": "题",
+        "options": [{"key": "A", "text": "甲"}, {"key": "B", "text": "乙"}],
+    }
+    cases = [
+        (
+            [],
+            lambda gateway: gateway.extract([{"name": "blank.png", "data_url": "data:image/png;base64,AA=="}]),
+            True,
+        ),
+        (
+            [{"index": 0, "answer": "Z", "explanation": "越界", "valid": True, "status": "confirmed"}],
+            lambda gateway: gateway.solve_batch([question]),
+            False,
+        ),
+        (
+            {"kind": "single", "text": "题", "options": [{"key": "A", "text": "甲"}], "answer": "A", "explanation": "理由", "knowledge_point": "知识", "knowledge": "知识", "purpose": "verify"},
+            lambda gateway: gateway.generate({}, "variant"),
+            True,
+        ),
+        (
+            {"answer": "Z", "explanation": "理由", "valid": True},
+            lambda gateway: gateway.verify(question),
+            True,
+        ),
+    ]
+
+    for payload, operation, raises_error in cases:
+        observed = []
+        gateway = ModelGateway(settings(), httpx.MockTransport(lambda request, payload=payload: response(payload)))
+        gateway.observer = observed.append
+        if raises_error:
+            with pytest.raises(ProviderError, match="格式|未识别"):
+                await operation(gateway)
+        else:
+            assert await operation(gateway) == []
+        assert observed[-1]["success"] is False
+        assert observed[-1]["error_kind"] == "response_schema"
+
+
+@pytest.mark.anyio
 async def test_missing_api_key_fails_without_network_call():
     calls = 0
 

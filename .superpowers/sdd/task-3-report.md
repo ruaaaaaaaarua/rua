@@ -19,3 +19,17 @@
 ## Review note
 
 Independent review found no critical or important issues. Low-priority follow-up: streaming HTTP failures currently use the general rejection category rather than splitting rate-limit/unavailable categories as non-stream calls do; broader fallback/bounds test coverage would also be useful.
+
+## Controller review follow-up
+
+- `Store.record_call` now normalizes every supplied error category against the provider safe-category allowlist before persistence; arbitrary text is replaced by `provider_error`.
+- Semantic response-schema rejections now participate in `_call` telemetry before the observer runs. Empty extraction, invalid batched answer entries, generated-purpose mismatches, and verification-answer mismatches all record `success: false` with `error_kind: response_schema`.
+- Added focused regressions for both boundaries.
+
+### Follow-up verification
+
+- Focused regressions: `4 passed`
+- `./.venv/bin/pytest -q`: `61 passed`
+- `npm --prefix web test -- --run`: `11 passed`
+- `npm --prefix web run build`: passed (existing bundle-size advisory only)
+- `git diff --check`: passed

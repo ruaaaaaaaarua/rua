@@ -33,6 +33,19 @@ def test_call_record_omits_sensitive_error_details(tmp_path):
     assert 'prompt' not in event and 'api_key' not in event and 'raw_response' not in event
 
 
+def test_call_record_normalizes_unknown_error_kind_before_persistence(tmp_path):
+    store = Store(tmp_path)
+    store.record_call({
+        'task': 'solve', 'profile_id': 'profile', 'model': 'model', 'success': False,
+        'error_kind': 'raw provider response: private-key',
+    })
+
+    with store.connect() as db:
+        event = json.loads(db.execute('SELECT data FROM calls').fetchone()['data'])
+    assert event['error_kind'] == 'provider_error'
+    assert 'private-key' not in json.dumps(event, ensure_ascii=False)
+
+
 def test_disputed_quiz_cannot_update_knowledge(tmp_path):
     store=Store(tmp_path);s=store.create_session()
     s['messages']=[{'quiz':{'id':'quiz','disputed':True,'status':'ready','question':{'kind':'single'},'solution':{'answer':'B'}}}]

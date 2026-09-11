@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .providers import normalize_error_kind
+
 TASKS = ('vision', 'solve', 'chat', 'generate', 'verify')
 
 
@@ -100,6 +102,8 @@ class Store:
         clean={k:event.get(k) for k in allowed}
         if 'error_kind' not in event:
             clean.pop('error_kind')
+        else:
+            clean['error_kind']=normalize_error_kind(clean['error_kind'])
         clean['created_at']=now()
         with self.connect() as db:
             db.execute('INSERT INTO calls VALUES (?,?)',(uid(),json.dumps(clean,ensure_ascii=False)))

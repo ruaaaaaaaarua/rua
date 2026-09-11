@@ -3,7 +3,7 @@ import hashlib
 import json
 import inspect
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional, Type
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Type
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -34,12 +34,27 @@ from .prompts import (
 )
 
 
+SAFE_ERROR_KINDS = frozenset({
+    "provider_error",
+    "configuration",
+    "provider_rate_limited",
+    "provider_rejected",
+    "provider_unavailable",
+    "request_invalid",
+    "response_schema",
+})
+
+
+def normalize_error_kind(error_kind: Any) -> str:
+    return error_kind if error_kind in SAFE_ERROR_KINDS else "provider_error"
+
+
 class ProviderError(RuntimeError):
     """A provider failure safe to display to a local user."""
 
     def __init__(self, message: str, error_kind: str = "provider_error"):
         super().__init__(message)
-        self.error_kind = error_kind
+        self.error_kind = normalize_error_kind(error_kind)
 
 
 # Whole-page transcription needs thousands of tokens; provider defaults cap far too low.
@@ -99,7 +114,10 @@ class ModelGateway:
         ]
         for image in images:
             content.append({"type": "image_url", "image_url": {"url": image["data_url"]}})
-        result = await self._call("vision", content, ExtractedQuestions, coerce=self._unwrap_root)
+        result = await self._call(
+            "vision", content, ExtractedQuestions, coerce=self._unwrap_root,
+            semantic_error_kind=lambda parsed: "response_schema" if not parsed.root else None,
+        )
         if not result.root:
             raise ProviderError("未识别到题目，请确认图片清晰且包含完整题目", "response_schema")
         return [item.model_dump() for item in result.root]
@@ -146,14 +164,18 @@ class ModelGateway:
         return (await self._call("vision", content, ReferenceExtraction)).model_dump()
 
     async def solve(self, question: Dict[str, Any]) -> Dict[str, Any]:
-        result = await self._call("solve", solve_prompt(question), Solution)
+        result = await self._call(
+            "solve", solve_prompt(question), Solution,
+            semantic_error_kind=lambda parsed: self._answer_error_kind(question, parsed),
+        )
         if result.valid and result.status == "confirmed":
             self._validate_answer(question, result.answer)
         return result.model_dump()
 
     async def solve_batch(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result = await self._call(
-            "solve", solve_batch_prompt(questions), BatchedSolutions, coerce=self._unwrap_root, batch=True
+            "solve", solve_batch_prompt(questions), BatchedSolutions, coerce=self._unwrap_root, batch=True,
+            semantic_error_kind=lambda parsed: self._batch_answer_error_kind(parsed, questions),
         )
         items: List[Dict[str, Any]] = []
         for item in result.root:
@@ -194,14 +216,18 @@ class ModelGateway:
         if purpose not in {"variant", "verify", "prerequisite", "depth"}:
             raise ProviderError("训练目的无效", "request_invalid")
         result = await self._call(
-            "generate", generation_prompt(context, purpose), GeneratedQuestion
+            "generate", generation_prompt(context, purpose), GeneratedQuestion,
+            semantic_error_kind=lambda parsed: "response_schema" if parsed.purpose != purpose else None,
         )
         if result.purpose != purpose:
             raise ProviderError("模型响应格式不符合要求，请重试", "response_schema")
         return result.model_dump()
 
     async def verify(self, question: Dict[str, Any]) -> Dict[str, Any]:
-        result = await self._call("verify", verification_prompt(question), Verification)
+        result = await self._call(
+            "verify", verification_prompt(question), Verification,
+            semantic_error_kind=lambda parsed: self._answer_error_kind(question, parsed),
+        )
         if result.valid:
             self._validate_answer(question, result.answer)
         return result.model_dump()
@@ -214,6 +240,25 @@ class ModelGateway:
             validate_choice_answer(question.get("kind", "short"), options, answer)
         except (TypeError, ValueError, ValidationError):
             raise ProviderError("模型响应格式不符合要求，请重试", "response_schema") from None
+
+    def _answer_error_kind(self, question: Dict[str, Any], result: BaseModel) -> Optional[str]:
+        if not getattr(result, "valid", False) or getattr(result, "status", "confirmed") != "confirmed":
+            return None
+        try:
+            self._validate_answer(question, result.answer)
+        except ProviderError as exc:
+            return exc.error_kind
+        return None
+
+    def _batch_answer_error_kind(
+        self, result: BaseModel, questions: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        for item in result.root:
+            if item.valid and item.status == "confirmed" and item.index < len(questions):
+                error_kind = self._answer_error_kind(questions[item.index], item)
+                if error_kind:
+                    return error_kind
+        return None
 
     def _profile(self, task: str) -> Dict[str, Any]:
         profile_id = self.settings.get("tasks", {}).get(task)
@@ -296,7 +341,8 @@ class ModelGateway:
                     pass
 
     async def _call(
-        self, task: str, content: Any, schema: Type[BaseModel], coerce=None, batch: bool = False
+        self, task: str, content: Any, schema: Type[BaseModel], coerce=None, batch: bool = False,
+        semantic_error_kind: Optional[Callable[[BaseModel], Optional[str]]] = None,
     ) -> BaseModel:
         profile = self._profile(task)
         await self._await_token_budget(profile)
@@ -366,7 +412,11 @@ class ModelGateway:
             if coerce is not None:
                 payload = coerce(payload)
             result = schema.model_validate(payload)
-            success = True
+            if semantic_error_kind:
+                semantic_kind = semantic_error_kind(result)
+                if semantic_kind:
+                    error_kind = normalize_error_kind(semantic_kind)
+            success = error_kind is None
             return result
         except ProviderError as exc:
             error_kind = exc.error_kind
