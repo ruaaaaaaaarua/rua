@@ -1,17 +1,16 @@
 """Local records and auditable knowledge projection. No model owns state."""
 import copy
-import hashlib
 import json
 import os
 import sqlite3
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from .providers import normalize_error_kind
 
-TASKS = ('vision', 'solve', 'chat', 'generate', 'verify')
+TASKS = ('vision', 'solve', 'chat')
 
 
 def now():
@@ -50,12 +49,13 @@ class Store:
               CREATE INDEX IF NOT EXISTS evidence_source ON evidence(session_id,question_id);
               CREATE TABLE IF NOT EXISTS config(id INTEGER PRIMARY KEY, data TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS daily_sessions(day TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
             ''')
         os.chmod(self.database, 0o600)
         # Interrupted remote calls are resumable, never silently considered completed.
         for session in self.sessions(full=True):
-            if session['status'] in ('analyzing','training','chatting'):
-                session.update(status='error',error='上次处理被中断，已保存内容，可重试。')
+            if session.get('processing') or session['status'] in ('recognizing','analyzing','training','chatting'):
+                session.update(status='error',processing=False,job_phase=None,error='上次处理被中断，已保存内容，可重试。')
                 self.save_session(session)
 
     def connect(self):
@@ -64,7 +64,15 @@ class Store:
         db.execute('PRAGMA journal_mode=WAL')
         return db
 
-    def create_session(self, title='新的刷题', mode=None, demo=False):
+    def create_session(self, title=None, mode=None, demo=False):
+        if not title or title in ('新的学习', '新的刷题', '学习对话'):
+            day=datetime.fromisoformat(now()).astimezone(timezone(timedelta(hours=8))).strftime('%Y%m%d')
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('INSERT OR IGNORE INTO daily_sessions VALUES (?,0)',(day,))
+                db.execute('UPDATE daily_sessions SET sequence=sequence+1 WHERE day=?',(day,))
+                sequence=db.execute('SELECT sequence FROM daily_sessions WHERE day=?',(day,)).fetchone()['sequence']
+            title=f'电力系统分析{sequence} · {day[2:]}'
         session = dict(id=uid(),title=title,created_at=now(),updated_at=now(),
             status='ready',mode=mode or self.settings()['mode'],demo=demo,
             messages=[],questions=[],attachments=[],references=[])
@@ -92,6 +100,8 @@ class Store:
         with self.connect() as db:
             row=db.execute('SELECT data FROM config WHERE id=1').fetchone()
         settings=json.loads(row['data']) if row else dict(profiles=[],tasks={k:'' for k in TASKS},mode='direct')
+        settings['tasks'] = {k: settings.get('tasks', {}).get(k, '') for k in TASKS}
+        settings['mode'] = 'direct'
         if public:
             for p in settings['profiles']:
                 p['has_key']=bool(p.pop('api_key',''))
@@ -131,76 +141,19 @@ class Store:
         if question_id: sql+=' AND question_id=?'; args.append(question_id)
         with self.connect() as db: db.execute(sql,args)
 
-    def record_evidence(self, session_id, question, attempt_id=None, help_kind='independent', purpose='original'):
-        session=self.get_session(session_id)
-        if not session or session.get('demo'): return
-        analysis=question.get('analysis') or {}
-        qid=attempt_id or question['id']
-        # Replace prior judgment for this exact source; keeps superseded history auditable.
-        self.retract(session_id,qid)
-        if analysis.get('status')!='confirmed' or analysis.get('correct') is None: return
-        name=question.get('knowledge') or analysis.get('knowledge') or '尚未归类'
-        subject=question.get('subject') or '未分类'
-        chapter=question.get('chapter') or '未分类'
-        key='|'.join((subject,chapter,name)).casefold().replace(' ','')
-        kid=hashlib.sha256(key.encode()).hexdigest()[:20]
-        data=dict(id=uid(),session_id=session_id,question_id=qid,knowledge_id=kid,
-            name=name,subject=subject,chapter=chapter,created_at=now(),
-            correct=analysis['correct'],reasoning_ok=analysis.get('reasoning_ok'),
-            observation=analysis.get('diagnosis') or analysis.get('knowledge_point') or '本题作答已记录',
-            reasoning=question.get('reasoning',''),has_reasoning=bool(question.get('reasoning')),confidence=question.get('confidence','unknown'),
-            help_kind=help_kind,purpose=purpose,source_deleted=False,
-            question_excerpt=question.get('text','')[:400])
-        with self.connect() as db:
-            db.execute('INSERT INTO evidence VALUES (?,?,?,?,1,?)',
-                (data['id'],session_id,qid,kid,json.dumps(data,ensure_ascii=False)))
-        analysis['knowledge_id']=kid
-
-    def knowledge(self):
-        with self.connect() as db: rows=db.execute('SELECT valid,data FROM evidence ORDER BY rowid').fetchall()
-        groups={}
-        for row in rows:
-            e=json.loads(row['data']); e['valid']=bool(row['valid'])
-            group=groups.setdefault(e['knowledge_id'],{'all':[],'valid':[]})
-            group['all'].append(e)
-            if e['valid']: group['valid'].append(e)
-        result=[]
-        for kid,g in groups.items():
-            es=g['valid']
-            if not es: continue
-            last=es[-1]
-            # Exploration cannot erase demonstrated fundamentals.
-            core=[e for e in es if e['purpose']!='depth']
-            base=core[-1] if core else last
-            independent=[e for e in core if e['help_kind']=='independent' and e['correct'] and
-                         e['confidence'] not in ('unsure','guess') and e['reasoning_ok'] is not False]
-            has_problem=not base['correct'] or base['reasoning_ok'] is False or base['confidence'] in ('unsure','guess')
-            if has_problem: state='待验证'; summary=base['observation']
-            elif base['help_kind']!='independent': state='待独立验证'; summary='得到提示或解析后通过，尚需独立作答证据。'
-            elif base['purpose'] in ('verify','prerequisite','variant'):
-                state='独立验证通过'; summary='本次针对性验证通过，持续观察其他条件下的表现。'
-            elif base.get('reasoning_ok') is True and base.get('has_reasoning',bool(base.get('reasoning'))):
-                state='已有理解依据'; summary='本次答案及关键思路正确，尚不足以判断长期稳定。'
-            else: state='本题答对'; summary='已记录正确作答，尚无充分的理解与保持证据。'
-            independent_dates={e['created_at'][:10] for e in independent}
-            # No percentages; require multiple days plus explicit reasoning and no recent problems.
-            if not has_problem and len(independent)>=3 and len(independent_dates)>=2 and any(e['reasoning_ok'] is True and e.get('has_reasoning',bool(e.get('reasoning'))) for e in independent):
-                last_problem=max((i for i,e in enumerate(core) if not e['correct'] or e['reasoning_ok'] is False), default=-1)
-                after=[e for e in core[last_problem+1:] if e in independent]
-                if len(after)>=3 and len({e['created_at'][:10] for e in after})>=2:
-                    state='表现较稳定'; summary='多次跨日独立作答有一致证据，仍保留适用条件边界。'
-            if last['purpose']=='depth' and not last['correct']:
-                summary+=' 深入测试的新条件尚待验证，不改变已有基础证据。'
-            result.append(dict(id=kid,subject=last['subject'],chapter=last['chapter'],name=last['name'],state=state,
-                summary=summary,last_verified=independent[-1]['created_at'] if independent else None,
-                evidence_count=len(es),evidence=list(reversed(es)),
-                history=[dict(created_at=e['created_at'],summary=e['observation'],valid=e['valid'],correct=e['correct'],help_kind=e['help_kind']) for e in reversed(g['all'])]))
-        return sorted(result,key=lambda k:(k['state'] not in ('待验证','待独立验证'),k['subject'],k['chapter']))
-
     def delete_session(self, ident, delete_evidence=False):
         session=self.get_session(ident)
         if not session: return
         with self.connect() as db:
+            tables={r['name'] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'question_links' in tables:
+                db.execute('DELETE FROM question_links WHERE session_id=?',(ident,))
+            if 'review_runs' in tables:
+                for row in db.execute('SELECT id,data FROM review_runs').fetchall():
+                    if json.loads(row['data']).get('session_id')==ident:
+                        db.execute('DELETE FROM review_runs WHERE id=?',(row['id'],))
+            if delete_evidence and 'study_events' in tables:
+                db.execute('DELETE FROM study_events WHERE session_id=?',(ident,))
             if delete_evidence:
                 db.execute('DELETE FROM evidence WHERE session_id=?',(ident,))
             else:

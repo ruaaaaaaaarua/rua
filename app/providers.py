@@ -9,28 +9,21 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from .models import (
-    BatchedDiagnoses,
     BatchedSolutions,
     ChatReply,
-    Diagnosis,
     ExtractedQuestions,
-    GeneratedQuestion,
     ReferenceExtraction,
     Solution,
-    Verification,
     validate_choice_answer,
 )
 from .prompts import (
     chat_prompt,
-    diagnosis_batch_prompt,
-    diagnosis_prompt,
     extraction_prompt,
-    generation_prompt,
     reference_extraction_prompt,
     solve_batch_prompt,
     solve_prompt,
+    stream_chat_prompt,
     stream_extraction_prompt,
-    verification_prompt,
 )
 
 
@@ -62,6 +55,8 @@ TASK_LIMITS = {
     # Vision thinking length varies wildly run to run; a tight cap truncates
     # the transcription JSON mid-array (observed at 16k on a dense page).
     "vision": {"max_tokens": 32768, "timeout": 420.0},
+    "solve": {"max_tokens": 4096, "timeout": 180.0},
+    "chat": {"max_tokens": 4096, "timeout": 180.0},
     "default": {"max_tokens": 16384, "timeout": 180.0},
 }
 
@@ -87,7 +82,7 @@ class ModelGateway:
 
     def parallel_for(self, task: str) -> int:
         profile = self._profile(task)
-        return int(profile.get("parallel") or self.settings.get("parallel") or 1)
+        return int(profile.get("parallel") or self.settings.get("parallel") or (2 if task == 'solve' else 1))
 
     async def _await_token_budget(self, profile: Dict[str, Any]) -> None:
         events = self._usage_events.setdefault(self.rate_key(profile), [])
@@ -189,24 +184,6 @@ class ModelGateway:
             items.append(item.model_dump())
         return items
 
-    async def diagnose(
-        self, question: Dict[str, Any], solution: Dict[str, Any], history: Any
-    ) -> Dict[str, Any]:
-        result = await self._call(
-            "solve", diagnosis_prompt(question, solution, history), Diagnosis
-        )
-        return result.model_dump()
-
-    async def diagnose_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        result = await self._call(
-            "solve", diagnosis_batch_prompt(items), BatchedDiagnoses, coerce=self._unwrap_root, batch=True
-        )
-        return [
-            item.model_dump()
-            for item in result.root
-            if item.index < len(items)
-        ]
-
     async def chat(self, context: Any, text: str, mode: str) -> Dict[str, Any]:
         if mode not in {"direct", "hint"}:
             raise ProviderError("对话模式无效", "request_invalid")
@@ -214,32 +191,24 @@ class ModelGateway:
             exclude_none=True
         )
 
-    async def generate(self, context: Any, purpose: str) -> Dict[str, Any]:
-        if purpose not in {"variant", "verify", "prerequisite", "depth"}:
-            raise ProviderError("训练目的无效", "request_invalid")
-        result = await self._call(
-            "generate", generation_prompt(context, purpose), GeneratedQuestion,
-            semantic_error_kind=lambda parsed: "response_schema" if parsed.purpose != purpose else None,
-        )
-        if result.purpose != purpose:
-            raise ProviderError("模型响应格式不符合要求，请重试", "response_schema")
-        return result.model_dump()
-
-    async def verify(self, question: Dict[str, Any]) -> Dict[str, Any]:
-        result = await self._call(
-            "verify", verification_prompt(question), Verification,
-            semantic_error_kind=lambda parsed: self._answer_error_kind(question, parsed),
-        )
-        if result.valid:
-            self._validate_answer(question, result.answer)
-        return result.model_dump()
+    async def stream_chat(
+        self, context: Any, text: str, mode: str = "direct"
+    ) -> AsyncIterator[str]:
+        if mode not in {"direct", "hint"}:
+            raise ProviderError("对话模式无效", "request_invalid")
+        async for part in self._stream(
+            "chat",
+            stream_chat_prompt(context, text, mode),
+            system_instruction="你是严谨的电网学习助手。请直接回复纯文本或 Markdown。",
+        ):
+            yield part
 
     @staticmethod
     def _validate_answer(question: Dict[str, Any], answer: Any) -> None:
         try:
             from .models import Option
             options = [Option.model_validate(item) for item in question.get("options", [])]
-            validate_choice_answer(question.get("kind", "short"), options, answer)
+            validate_choice_answer(question.get("kind", "single"), options, answer)
         except (TypeError, ValueError, ValidationError):
             raise ProviderError("模型响应格式不符合要求，请重试", "response_schema") from None
 
@@ -279,23 +248,33 @@ class ModelGateway:
                 raise ProviderError("模型配置不完整", "configuration")
         return profile
 
-    async def _stream(self, task: str, content: Any, max_tokens: Optional[int] = None) -> AsyncIterator[str]:
+    async def _stream(
+        self, task: str, content: Any, max_tokens: Optional[int] = None,
+        system_instruction: Optional[str] = None,
+    ) -> AsyncIterator[str]:
         profile = self._profile(task)
         await self._await_token_budget(profile)
         started = time.monotonic()
         success = False
         error_kind = None
+        usage: Dict[str, Any] = {}
         limits = TASK_LIMITS.get(task, TASK_LIMITS["default"])
         body = {
             "model": profile["model"],
             "max_tokens": max_tokens or limits["max_tokens"],
             "stream": True,
-            "thinking": {"type": "disabled"},
+            "stream_options": {"include_usage": True},
             "messages": [
-                {"role": "system", "content": "你是严谨的电网学习助手。按用户指定的 NDJSON 协议输出。"},
+                {"role": "system", "content": system_instruction or "你是严谨的电网学习助手。按用户指定的 NDJSON 协议输出。"},
                 {"role": "user", "content": content},
             ],
         }
+        if task == "vision":
+            body["thinking"] = {"type": "disabled"}
+        elif profile["model"].casefold().startswith("glm-5.3"):
+            body["reasoning_effort"] = "low"
+        elif profile.get("disable_thinking"):
+            body["thinking"] = {"type": "disabled"}
         headers = {"Authorization": "Bearer " + profile["api_key"], "Content-Type": "application/json"}
         url = profile["base_url"].rstrip("/") + "/chat/completions"
         try:
@@ -303,6 +282,10 @@ class ModelGateway:
             async with httpx.AsyncClient(transport=self.transport, timeout=timeout) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code >= 400:
+                        if response.status_code == 429:
+                            raise ProviderError("模型服务限流，请稍后重试", "provider_rate_limited")
+                        if response.status_code >= 500:
+                            raise ProviderError("模型服务暂时不可用，请稍后重试", "provider_unavailable")
                         raise ProviderError("模型服务拒绝了请求，请检查本地配置", "provider_rejected")
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -312,9 +295,23 @@ class ModelGateway:
                             success = True
                             return
                         try:
-                            delta = json.loads(data)["choices"][0]["delta"].get("content")
-                        except (TypeError, ValueError, KeyError, IndexError):
+                            frame = json.loads(data)
+                            if not isinstance(frame, dict):
+                                raise TypeError("SSE frame is not an object")
+                            frame_usage = frame.get("usage")
+                            if frame_usage is not None and not isinstance(frame_usage, dict):
+                                raise TypeError("SSE usage is not an object")
+                            if frame_usage:
+                                usage = frame_usage
+                            choices = frame.get("choices") or []
+                            delta = choices[0].get("delta", {}).get("content") if choices else None
+                            finish = choices[0].get("finish_reason") if choices else None
+                        except (AttributeError, TypeError, ValueError, KeyError, IndexError):
                             raise ProviderError("模型流式响应格式不符合要求，请重试", "response_schema") from None
+                        if finish in {"length", "content_filter"}:
+                            raise ProviderError("模型输出被截断或拦截，请重试", "response_schema")
+                        if delta and not isinstance(delta, str):
+                            raise ProviderError("模型流式响应格式不符合要求，请重试", "response_schema")
                         if delta:
                             yield delta
             raise ProviderError("模型流式响应提前结束，请重试", "response_schema")
@@ -325,12 +322,13 @@ class ModelGateway:
             error_kind = "provider_unavailable"
             raise ProviderError("模型服务暂时不可用，请稍后重试", error_kind) from None
         finally:
+            self._note_usage(profile, usage)
             event = {
                 "task": task,
                 "profile_id": profile.get("id"),
                 "model": profile.get("model"),
-                "input_tokens": None,
-                "output_tokens": None,
+                "input_tokens": usage.get("prompt_tokens"),
+                "output_tokens": usage.get("completion_tokens"),
                 "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
                 "success": success,
             }
@@ -375,8 +373,8 @@ class ModelGateway:
                 {"role": "user", "content": content},
             ],
         }
-        # Opt-in GLM-style reasoning switch; providers without it stay untouched.
-        if batch and profile["model"].casefold().startswith("glm-5.3"):
+        # GLM 5.3 uses low reasoning for both ordinary and batched text work.
+        if profile["model"].casefold().startswith("glm-5.3"):
             body["reasoning_effort"] = "low"
         elif batch or profile.get("disable_thinking"):
             body["thinking"] = {"type": "disabled"}

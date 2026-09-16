@@ -1,319 +1,99 @@
-import asyncio
 import json
-from app.store import Store
-from app.service import LearningService,public_session
-from app.providers import ProviderError
-from tests.test_api import Gateway
+from concurrent.futures import ThreadPoolExecutor
+from tests.test_api import setup
 
 
-def test_pending_diagnosis_does_not_become_confirmed(tmp_path):
-    class Pending(Gateway):
-        async def diagnose(self,*args):
-            return dict(status='pending',correct=None,diagnosis='题目条件存在歧义',reasoning_ok=None)
-    store=Store(tmp_path); s=store.create_session()
-    s['questions']=asyncio.run(Gateway().extract([]));s['questions'][0]['id']='q'
-    store.save_session(s)
-    service=LearningService(store,lambda _:Pending())
-    result=asyncio.run(service.analyze(s))
-    assert result['questions'][0]['analysis']['correct'] is None
-    assert not store.knowledge()
+def test_pending_solution_never_scheduled(tmp_path):
+    c, app, gateway, sid = setup(tmp_path)
+    async def pending(q):
+        return dict(answer='', explanation='题干条件缺失', valid=False, status='pending')
+    gateway.solve = pending
+    c.post(f'/api/sessions/{sid}/analyze')
+    assert c.get('/api/reviews').json()['total'] == 0
+    assert app.state.service.study.events(sid, 'q1') == []
 
 
-def test_call_record_omits_sensitive_error_details(tmp_path):
-    store = Store(tmp_path)
-    store.record_call({
-        'task': 'solve', 'profile_id': 'profile', 'model': 'model',
-        'success': False, 'error_kind': 'response_schema',
-        'prompt': 'private prompt', 'api_key': 'private key', 'raw_response': 'private response',
-    })
-
-    with store.connect() as db:
-        event = json.loads(db.execute('SELECT data FROM calls').fetchone()['data'])
-    assert event['error_kind'] == 'response_schema'
-    assert 'prompt' not in event and 'api_key' not in event and 'raw_response' not in event
+def test_legacy_diagnosis_never_becomes_new_learner_state(tmp_path):
+    c, app, _, sid = setup(tmp_path)
+    s=app.state.store.get_session(sid)
+    s['questions'][0]['analysis']=dict(status='confirmed',correct=False,diagnosis='概念混淆',answer='B')
+    app.state.store.save_session(s)
+    q=c.get(f'/api/sessions/{sid}').json()['questions'][0]
+    assert 'diagnosis' not in q['analysis']
+    assert c.get('/api/reviews').json()['total'] == 0
+    assert c.get('/api/wiki/psa-per-unit').json()['learning']['event_count'] == 0
 
 
-def test_call_record_normalizes_unknown_error_kind_before_persistence(tmp_path):
-    store = Store(tmp_path)
-    store.record_call({
-        'task': 'solve', 'profile_id': 'profile', 'model': 'model', 'success': False,
-        'error_kind': 'raw provider response: private-key',
-    })
-
-    with store.connect() as db:
-        event = json.loads(db.execute('SELECT data FROM calls').fetchone()['data'])
-    assert event['error_kind'] == 'provider_error'
-    assert 'private-key' not in json.dumps(event, ensure_ascii=False)
+def test_multi_concept_error_is_associated_fact_not_diagnosis(tmp_path):
+    c, app, _, sid=setup(tmp_path)
+    c.put(f'/api/sessions/{sid}/questions/q1/links',json={'knowledge_ids':['psa-per-unit','psa-transformer']})
+    c.post(f'/api/sessions/{sid}/analyze')
+    learning=c.get('/api/wiki/psa-transformer').json()['learning']
+    assert '次可用作答' in learning['summary']
+    assert '掌握' not in learning['summary']
+    assert 'misconception' not in learning
 
 
-def test_disputed_quiz_cannot_update_knowledge(tmp_path):
-    store=Store(tmp_path);s=store.create_session()
-    s['messages']=[{'quiz':{'id':'quiz','disputed':True,'status':'ready','question':{'kind':'single'},'solution':{'answer':'B'}}}]
-    store.save_session(s)
-    service=LearningService(store,lambda _:Gateway())
-    import pytest
-    with pytest.raises(ValueError,match='失效|复核|争议'):
-        asyncio.run(service.answer_quiz(s,'quiz','B'))
-    assert not store.knowledge()
+def test_answering_twice_concurrently_records_only_one_event(tmp_path):
+    c, app, _, sid=setup(tmp_path)
+    c.post(f'/api/sessions/{sid}/analyze')
+    study=app.state.service.study
+    run=study.start(sid,'q1')
+    def answer():
+        try:
+            study.review(run['id'],'B')
+            return 'ok'
+        except ValueError:
+            return 'rejected'
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(lambda _: answer(),range(2)))
+    assert sorted(results)==['ok','rejected']
+    assert len([e for e in study.events(sid,'q1') if e['kind']=='review_answer'])==1
 
 
-def test_revealed_quiz_answer_is_not_available_until_explicit_action():
-    s={'mode':'hint','questions':[],'messages':[{'quiz':{'id':'q','status':'answered','question':{'kind':'single','answer':'B','explanation':'B'},'solution':{'answer':'B','explanation':'平方'},'answer':'A','correct':False}}]}
-    p=public_session(s)
-    assert 'explanation' not in p['messages'][0]['quiz']
-    s['messages'][0]['quiz']['revealed']=True
-    p=public_session(s)
-    assert p['messages'][0]['quiz']['correct_answer']=='B'
-    assert p['messages'][0]['quiz']['explanation']=='平方'
+def test_reveal_review_contaminates_other_run(tmp_path):
+    c, app, _, sid=setup(tmp_path)
+    c.post(f'/api/sessions/{sid}/analyze')
+    study=app.state.service.study
+    first=study.start(sid,'q1');second=study.start(sid,'q1')
+    study.review(first['id'])
+    assert study.review(second['id'],'B')['help_kind']=='assisted'
 
 
-def test_original_retry_keeps_first_evidence_and_is_assisted(tmp_path):
-    store=Store(tmp_path); s=store.create_session()
-    q=asyncio.run(Gateway().extract([]))[0];q['id']='q';s['questions']=[q];store.save_session(s)
-    svc=LearningService(store,lambda _:Gateway())
-    asyncio.run(svc.analyze(s))
-    result=asyncio.run(svc.retry_question(s,'q','B',''))
-    k=store.knowledge()[0]
-    assert k['evidence_count']==2
-    assert any(e['correct'] is False for e in k['evidence'])
-    assert k['evidence'][0]['help_kind']=='assisted'
-    assert result['questions'][0]['user_answer']=='A'
-    assert result['questions'][0]['attempts'][-1]['answer']=='B'
+def test_deleted_session_does_not_leave_review_queue(tmp_path):
+    c, _, _, sid=setup(tmp_path)
+    c.post(f'/api/sessions/{sid}/analyze')
+    c.delete(f'/api/sessions/{sid}')
+    assert c.get('/api/reviews').json()['total']==0
 
 
-def test_recheck_replaces_solution_for_future_retry(tmp_path):
-    class Revised(Gateway):
-        async def solve(self,q): return dict(answer='C',explanation='新核查结果',valid=True)
-        async def diagnose(self,*args): return dict(status='confirmed',reasoning_ok=None)
-    store=Store(tmp_path); s=store.create_session()
-    q=asyncio.run(Gateway().extract([]))[0]; q['id']='q'; s['questions']=[q]; store.save_session(s)
-    svc=LearningService(store,lambda _:Gateway()); asyncio.run(svc.analyze(s))
-    svc.gateway_factory=lambda _:Revised()
-    asyncio.run(svc.recheck(s,'q','补充完整条件'))
-    result=asyncio.run(svc.retry_question(s,'q','C'))
-    assert result['questions'][0]['attempts'][-1]['correct'] is True
+def test_repeated_analysis_is_idempotent(tmp_path):
+    c, app, gateway, sid=setup(tmp_path)
+    c.post(f'/api/sessions/{sid}/analyze')
+    count=len(gateway.inputs)
+    c.post(f'/api/sessions/{sid}/analyze')
+    assert len(gateway.inputs)==count
+    assert len(app.state.service.study.events(sid,'q1'))==1
 
 
-def test_chat_sanitizes_quiz_history_and_marks_help(tmp_path):
-    class Inspect(Gateway):
-        async def chat(self,context,text,mode):
-            quiz=context['history'][0]['quiz']
-            assert 'solution' not in quiz
-            assert 'answer' not in quiz['question']
-            assert 'knowledge_point' not in quiz['question']
-            return {'content':'检查指数。'}
-    store=Store(tmp_path);s=store.create_session(mode='hint')
-    s['messages']=[{'id':'m','type':'quiz','role':'assistant','quiz':{'id':'quiz','status':'ready',
-        'help_kind':'independent','question':{'kind':'single','text':'Q','answer':'B','knowledge_point':'B is correct'},
-        'solution':{'answer':'B'}}}]
-    store.save_session(s)
-    asyncio.run(LearningService(store,lambda _:Inspect()).chat(s,'给个提示'))
-    assert s['messages'][0]['quiz']['help_kind']=='assisted'
-
-
-def test_explicit_chat_action_generates_one_quiz(tmp_path):
-    class Action(Gateway):
-        async def chat(self,*args):return {'content':'开始验证。','action':{'type':'train','question_id':'q','purpose':'variant'}}
-    store=Store(tmp_path);s=store.create_session()
-    s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}];store.save_session(s)
-    asyncio.run(LearningService(store,lambda _:Action()).chat(s,'第1题来一道类似题'))
-    assert len([m for m in s['messages'] if m.get('quiz')])==1
-
-
-def test_prerequisite_evidence_targets_generated_knowledge(tmp_path):
-    class Prerequisite(Gateway):
-        async def generate(self,context,purpose):
-            return {**await super().generate(context,purpose),'knowledge':'平方运算','subject':'数学基础','chapter':'代数'}
-    store=Store(tmp_path);s=store.create_session()
-    s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}];store.save_session(s)
-    svc=LearningService(store,lambda _:Prerequisite())
-    asyncio.run(svc.train(s,'q',purpose='prerequisite'))
-    quiz=s['messages'][-1]['quiz']
-    asyncio.run(svc.answer_quiz(s,quiz['id'],'B'))
-    assert store.knowledge()[0]['name']=='平方运算'
-
-
-def test_short_verification_accepts_semantically_equivalent_answers(tmp_path):
-    class Short(Gateway):
-        async def generate(self,*args):return dict(kind='short',text='功率如何变化？',options=[],answer='增大',explanation='关系成立')
-        async def verify(self,*args):return dict(answer='变大',explanation='关系成立',valid=True)
-        async def diagnose(self,*args):return dict(correct=True,status='confirmed',reasoning_ok=None)
-    store=Store(tmp_path);s=store.create_session()
-    s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}];store.save_session(s)
-    result=asyncio.run(LearningService(store,lambda _:Short()).train(s,'q'))
-    assert result['messages'][-1]['quiz']['status']=='ready'
-
-
-def test_knowledge_summary_retains_understanding_evidence_after_delete(tmp_path):
-    store=Store(tmp_path);s=store.create_session()
-    q=dict(id='q',knowledge='概念',reasoning='有明确依据',analysis=dict(correct=True,status='confirmed',reasoning_ok=True))
-    store.record_evidence(s['id'],q)
-    before=store.knowledge()[0]['state']
-    store.delete_session(s['id'])
-    assert store.knowledge()[0]['state']==before
-
-
-def test_pending_retry_does_not_add_evidence(tmp_path):
-    class Pending(Gateway):
-        async def diagnose(self,*args):return dict(status='pending',correct=None,reasoning_ok=None)
-    store=Store(tmp_path);s=store.create_session()
-    s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}];store.save_session(s)
-    svc=LearningService(store,lambda _:Gateway());asyncio.run(svc.analyze(s))
-    svc.gateway_factory=lambda _:Pending()
-    import pytest
-    with pytest.raises(ValueError,match='确认|判断'):
-        asyncio.run(svc.retry_question(s,'q','B','有争议的思路'))
-    assert store.knowledge()[0]['evidence_count']==1
-
-
-def test_saved_reference_is_used_in_recheck(tmp_path):
-    class Reference(Gateway):
-        async def solve(self,q):
-            assert '参考页中的附加条件' in q['reference_note']
-            return await super().solve(q)
-    store=Store(tmp_path);s=store.create_session()
-    s['questions']=[{**asyncio.run(Gateway().extract([]))[0],'id':'q'}]
-    s['references']=[{'text':'参考页中的附加条件'}];store.save_session(s)
-    asyncio.run(LearningService(store,lambda _:Reference()).recheck(s,'q','按刚上传的资料核查'))
-
-
-def _two_answered_questions():
-    base=asyncio.run(Gateway().extract([]))[0]
-    return [{**base,'id':'q1'}, {**base,'id':'q2','user_answer':'B'}]
-
-
-def test_batched_analysis_avoids_per_question_calls(tmp_path):
-    class Batched(Gateway):
-        solves=0
-        diagnose_items=[]
-        async def solve(self,q):
-            Batched.solves+=1; return await Gateway.solve(self,q)
-        async def solve_batch(self,questions):
-            return [dict(index=i,answer='B',explanation='平方关系',valid=True,status='confirmed') for i in range(len(questions))]
-        async def diagnose_batch(self,items):
-            type(self).diagnose_items=items
-            return [dict(index=it['index'],reasoning_ok=False,diagnosis='忽略平方',knowledge_point='功率与电压平方成正比',distinction='',hint='检查指数',error_type='formula_error',status='confirmed') for it in items]
-    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
-    gw=Batched()
-    service=LearningService(store,lambda _:gw)
-    service.related=lambda question:[{'id':str(index)} for index in range(4)]
-    result=asyncio.run(service.analyze(s))
-    assert Batched.solves==0
-    assert [q['analysis']['correct'] for q in result['questions']]==[False,True]
-    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
-    assert store.knowledge()[0]['evidence_count']==2
-    assert all(len(item['history'])==3 for item in Batched.diagnose_items)
-
-
-def test_batch_partial_results_fall_back_per_question(tmp_path):
-    class Partial(Gateway):
-        solves=0
-        async def solve_batch(self,questions):
-            return [dict(index=0,answer='B',explanation='平方关系',valid=True,status='confirmed')]
-        async def diagnose_batch(self,items):
-            return [dict(index=0,reasoning_ok=None,diagnosis='',knowledge_point='平方关系',distinction='',hint='检查指数',status='confirmed')]
-        async def solve(self,q):
-            Partial.solves+=1; return dict(answer='B',explanation='平方关系',valid=True)
-    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
-    gw=Partial()
-    result=asyncio.run(LearningService(store,lambda _:gw).analyze(s))
-    assert Partial.solves==1
-    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
-
-
-def test_batch_diagnosis_failure_reuses_batch_solutions(tmp_path):
-    class DiagnosisFails(Gateway):
-        batch_diagnoses=single_solves=single_diagnoses=0
-        async def solve_batch(self,questions):
-            return [dict(index=i,answer='B',explanation='平方关系',valid=True,status='confirmed') for i in range(len(questions))]
-        async def diagnose_batch(self,items):
-            type(self).batch_diagnoses+=1
-            raise ProviderError('批量诊断暂时不可用')
-        async def solve(self,q):
-            type(self).single_solves+=1
-            return await super().solve(q)
-        async def diagnose(self,*args):
-            type(self).single_diagnoses+=1
-            return await super().diagnose(*args)
-
-    store=Store(tmp_path);s=store.create_session();s['questions']=_two_answered_questions();store.save_session(s)
-    gateway=DiagnosisFails()
-    result=asyncio.run(LearningService(store,lambda _:gateway).analyze(s))
-    assert DiagnosisFails.single_solves==0
-    assert DiagnosisFails.batch_diagnoses==2
-    assert DiagnosisFails.single_diagnoses==2
-    assert all(q['analysis']['status']=='confirmed' for q in result['questions'])
-
-
-def test_extract_persists_questions_without_analysis_or_evidence(tmp_path):
-    class VisionOnly(Gateway):
-        extracts=solves=diagnoses=0
-        async def extract(self,images):
-            type(self).extracts+=1
-            return await Gateway.extract(self,images)
-        async def solve(self,question):
-            type(self).solves+=1
-            return await Gateway.solve(self,question)
-        async def diagnose(self,question,solution,history):
-            type(self).diagnoses+=1
-            return await Gateway.diagnose(self,question,solution,history)
-
-    store=Store(tmp_path);session=store.create_session()
-    store.attachments.joinpath('image').write_bytes(b'png')
-    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
-    store.save_session(session)
-
-    result=asyncio.run(LearningService(store,lambda _:VisionOnly()).extract(session))
-
-    assert result['status']=='extracted'
-    assert result['attachments'][0]['extracted'] is True
-    assert result['questions'] and 'analysis' not in result['questions'][0]
-    assert (VisionOnly.extracts,VisionOnly.solves,VisionOnly.diagnoses)==(1,0,0)
-    assert store.knowledge()==[]
-
-
-def test_stream_extract_persists_each_valid_question_before_done(tmp_path):
-    first=asyncio.run(Gateway().extract([]))[0]
-    second={**first,'number':'2','text':'第二题'}
-
-    class Streaming(Gateway):
-        async def stream_extract(self,images):
-            yield json.dumps({'type':'question','question':first},ensure_ascii=False)+'\n'
-            yield json.dumps({'type':'question','question':second},ensure_ascii=False)+'\n'
-            yield '{"type":"done"}\n'
-
-    store=Store(tmp_path);session=store.create_session()
-    store.attachments.joinpath('image').write_bytes(b'png')
-    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
-    store.save_session(session)
-
-    events=asyncio.run(_collect(LearningService(store,lambda _:Streaming()).extract_stream(session)))
-
-    assert [event['type'] for event in events]==['question','question','done']
-    assert len(session['questions'])==2
-    assert all('analysis' not in question for question in session['questions'])
-    assert session['status']=='extracted'
-    assert store.knowledge()==[]
-
-
-def test_stream_extract_accepts_a_final_ndjson_line_without_newline(tmp_path):
-    question=asyncio.run(Gateway().extract([]))[0]
-
-    class Streaming(Gateway):
-        async def stream_extract(self,images):
-            yield json.dumps({'type':'question','question':question},ensure_ascii=False)+'\n'
-            yield '{"type":"done"}'
-
-    store=Store(tmp_path);session=store.create_session()
-    store.attachments.joinpath('image').write_bytes(b'png')
-    session['attachments']=[dict(id='image',name='page.png',mime='image/png',extracted=False)]
-    store.save_session(session)
-
-    events=asyncio.run(_collect(LearningService(store,lambda _:Streaming()).extract_stream(session)))
-
-    assert [event['type'] for event in events]==['question','done']
-    assert session['status']=='extracted'
-
-
-async def _collect(events):
-    return [event async for event in events]
+def test_review_waits_for_same_session_chat_or_edit(tmp_path):
+    import asyncio
+    import httpx
+    c, app, gateway, sid=setup(tmp_path)
+    c.post(f'/api/sessions/{sid}/analyze')
+    run=app.state.service.study.start(sid,'q1')
+    async def scenario():
+        started=asyncio.Event(); release=asyncio.Event()
+        async def chat(*args):
+            started.set()
+            await release.wait()
+            return {'content':'解释已给出'}
+        gateway.chat=chat
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://testserver') as client:
+            pending=asyncio.create_task(client.post(f'/api/sessions/{sid}/messages',json={'text':'解释这题'}))
+            await started.wait()
+            response=await client.post(f'/api/reviews/{run["id"]}/answer',json={'answer':'B'})
+            release.set()
+            await pending
+            assert response.status_code==409
+    asyncio.run(scenario())

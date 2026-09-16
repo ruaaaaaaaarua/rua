@@ -1,67 +1,98 @@
-"""Learning orchestration; model outputs are proposals, not mutations."""
+"""Fixed learning workflow: retrieve Wiki, solve, attach, record observable facts."""
 import asyncio
 import base64
 import copy
 import json
+
+from .knowledge import KnowledgeLibrary, SUBJECT
+from .models import Option, validate_choice_answer
+from .providers import ProviderError
 from .store import message, normalized_answer, uid
+from .study import StudyRecords, later
 
 
 def public_session(session):
-    s=copy.deepcopy(session)
-    s.pop('solutions',None)
-    for q in s.get('questions',[]):
-        q.pop('solution',None)
-        a=q.get('analysis') or {}
-        if s.get('mode')=='hint' and a.get('correct') is False and not q.get('revealed'):
-            hint=a.get('hint') or '请检查题目条件与关键步骤。'
-            for key in ('answer','explanation','diagnosis','distinction','knowledge_point'):
-                a.pop(key,None)
-            a['diagnosis']=hint
-    for m in s.get('messages',[]):
-        quiz=m.get('quiz')
-        if quiz:
-            solution=quiz.pop('solution',None) or {}
-            if quiz.get('revealed'):
-                quiz['correct_answer']=solution.get('answer','')
-                quiz['explanation']=solution.get('explanation','')
-            quiz.pop('source',None)
-            for key in ('answer','explanation','solution','diagnosis','knowledge_point'):
-                quiz.get('question',{}).pop(key,None)
-                if quiz['status']=='ready' and not quiz.get('revealed'): quiz.pop(key,None)
+    s = copy.deepcopy(session)
+    s.pop('solutions', None)
+    for q in s.get('questions', []):
+        q.pop('solution', None)
+        q.pop('reasoning', None)
+        q.pop('confidence', None)
+        a = q.get('analysis') or {}
+        for key in ('diagnosis', 'distinction', 'error_type', 'reasoning_ok', 'hint'):
+            a.pop(key, None)
+        if a and a.get('schema_version') != 3:
+            q['legacy'] = True
+    # Old generated exercises remain in SQLite backups/history but are not active learning content.
+    s['messages'] = [m for m in s.get('messages', []) if not m.get('quiz')]
+    s['mode'] = 'direct'
     return s
 
 
 class LearningService:
-    def __init__(self,store,gateway_factory):
-        self.store=store
-        self.gateway_factory=gateway_factory
+    def __init__(self, store, gateway_factory, knowledge_dir=None):
+        self.store = store
+        self.gateway_factory = gateway_factory
+        self.library = KnowledgeLibrary(knowledge_dir)
+        self.study = StudyRecords(store, self.library)
 
     def gateway(self):
-        gateway=self.gateway_factory(self.store.settings())
-        gateway.observer=self.store.record_call
+        gateway = self.gateway_factory(self.store.settings())
+        gateway.observer = self.store.record_call
         return gateway
 
-    def related(self,question):
-        # Bound context to same subject; prioritise exact known names.
-        records=self.store.knowledge()
-        name=question.get('knowledge','')
-        records=[k for k in records if k['name']==name or k['subject']==question.get('subject')]
-        records.sort(key=lambda k:k['name']!=name)
-        return [{key:k[key] for key in ('id','name','subject','chapter','state','summary','last_verified')} for k in records[:12]]
+    def question(self, session, qid):
+        for q in session['questions']:
+            if q['id'] == qid:
+                return q
+        raise ValueError('没有找到这道题')
 
-    def canonicalize(self,q):
-        name=q.get('knowledge')
-        if not name: return
-        matches=[k for k in self.store.knowledge() if k['subject']==q.get('subject') and
-                 k['name'].replace(' ','').casefold()==name.replace(' ','').casefold()]
-        if matches: q.update(knowledge=matches[0]['name'],chapter=matches[0]['chapter'])
+    @staticmethod
+    def extraction_signature(question):
+        return json.dumps({k: question.get(k) for k in ('number', 'kind', 'text', 'options')},
+                          ensure_ascii=False, sort_keys=True)
+
+    def cached_extraction(self, cached, ordinal, question):
+        if ordinal > len(cached):
+            question['extraction_signature'] = self.extraction_signature(question)
+            return False
+        previous = cached[ordinal - 1]
+        signature = previous.get('extraction_signature', self.extraction_signature(previous))
+        if signature != self.extraction_signature(question):
+            raise ProviderError('重试识别结果与已保存题目不一致，已保留原记录。请核对题目，或在新学习中重新上传。')
+        return True
+
+    def prepare_question(self, session, question):
+        question.setdefault('revision', 1)
+        question['subject'] = question.get('subject') or SUBJECT
+        if question['subject'] not in (SUBJECT, '待归类'):
+            question['scope_note'] = '当前知识库仅覆盖电力系统分析；本题暂不自动归类。'
+            question.setdefault('candidates', [])
+            return
+        self.study.match(session, question)
+
+    def decorate(self, session):
+        for q in session['questions']:
+            q['links'] = self.study.links(session['id'], q['id'])
+            q.setdefault('candidates', [])
+        return session
+
+    def wiki_context(self, question=None, text='', kid=None):
+        ids = [l['knowledge_id'] for l in (question or {}).get('links', [])]
+        if kid:
+            ids.append(kid)
+        return self.library.context(text or (question or {}).get('text', ''), ids)
+
+    @staticmethod
+    def citations(context):
+        return [{k: n[k] for k in ('id', 'name', 'version')} for n in context]
 
     async def extract_stream(self,s):
         from .models import ExtractedQuestion
         from .providers import ProviderError
 
         if s.get('demo'): return
-        if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+        if not s['attachments'] and not s['questions']: raise ValueError('请先上传题目图片。')
         pending=[a for a in s['attachments'] if not a.get('reference') and not a.get('extracted') and not a.get('deleted')]
         if not pending:
             s.update(status='extracted',error=None); self.store.save_session(s)
@@ -73,7 +104,8 @@ class LearningService:
         for attachment in pending:
             blob=(self.store.attachments/attachment['id']).read_bytes()
             data='data:'+attachment['mime']+';base64,'+base64.b64encode(blob).decode()
-            buffer=''; complete=False
+            buffer=''; complete=False; ordinal=0
+            cached=[q for q in s['questions'] if q.get('attachment_id')==attachment['id']]
 
             def parse_line(line):
                 try: event=json.loads(line)
@@ -94,8 +126,10 @@ class LearningService:
                     question=parse_line(line)
                     if question is None:
                         complete=True; continue
+                    ordinal+=1
+                    if self.cached_extraction(cached, ordinal, question): continue
                     question.update(id=uid(),attachment_id=attachment['id'],revealed=False)
-                    self.canonicalize(question); s['questions'].append(question)
+                    self.prepare_question(s, question); s['questions'].append(question)
                     self.store.save_session(s); saved+=1
                     yield {'type':'question','question':question}
             if buffer.strip():
@@ -106,20 +140,22 @@ class LearningService:
                 if question is None:
                     complete=True
                 else:
-                    question.update(id=uid(),attachment_id=attachment['id'],revealed=False)
-                    self.canonicalize(question); s['questions'].append(question)
-                    self.store.save_session(s); saved+=1
-                    yield {'type':'question','question':question}
-            if buffer.strip() or not complete:
+                    ordinal+=1
+                    if not self.cached_extraction(cached, ordinal, question):
+                        question.update(id=uid(),attachment_id=attachment['id'],revealed=False)
+                        self.prepare_question(s, question); s['questions'].append(question)
+                        self.store.save_session(s); saved+=1
+                        yield {'type':'question','question':question}
+            if buffer.strip() or not complete or ordinal < len(cached):
                 raise ProviderError('模型流式识别未完整结束，请重试')
             attachment['extracted']=True; self.store.save_session(s)
-        if not saved: raise ProviderError('未识别到题目，请确认图片清晰且包含完整题目')
+        if not s['questions']: raise ProviderError('未识别到题目，请确认图片清晰且包含完整题目')
         s.update(status='extracted',error=None); self.store.save_session(s)
         yield {'type':'done'}
 
     async def extract(self,s):
         if s.get('demo'): return s
-        if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+        if not s['attachments'] and not s['questions']: raise ValueError('请先上传题目图片。')
         s.update(status='recognizing',error=None); self.store.save_session(s)
         gateway=self.gateway()
         # Each successfully extracted attachment remains cached after failures.
@@ -128,256 +164,276 @@ class LearningService:
             blob=(self.store.attachments/a['id']).read_bytes()
             data='data:'+a['mime']+';base64,'+base64.b64encode(blob).decode()
             extracted=await gateway.extract([dict(data_url=data,name=a['name'])])
-            for q in extracted:
+            cached=[q for q in s['questions'] if q.get('attachment_id')==a['id']]
+            if len(extracted) < len(cached):
+                raise ProviderError('重试识别题目数量减少，已保留原记录，请核对图片后重试')
+            for ordinal, q in enumerate(extracted, 1):
+                if self.cached_extraction(cached, ordinal, q): continue
                 q.update(id=uid(),attachment_id=a['id'],revealed=False)
-                self.canonicalize(q)
+                self.prepare_question(s, q)
                 s['questions'].append(q)
             a['extracted']=True
             self.store.save_session(s)
         s.update(status='extracted',error=None); self.store.save_session(s)
         return s
 
-    async def analyze(self,s):
-        if s.get('demo'): return s
-        if not s['attachments'] and not s['questions']: raise ValueError('请先上传已作答的题目图片。')
+
+    async def analyze(self, s):
+        if s.get('demo'):
+            raise ValueError('旧演示仅供历史查看，请新建学习')
+        if not s['attachments'] and not s['questions']:
+            raise ValueError('请先上传题目图片')
         if any(not a.get('reference') and not a.get('extracted') and not a.get('deleted') for a in s['attachments']):
             await self.extract(s)
-        gateway=self.gateway()
-        s.update(status='analyzing',error=None); self.store.save_session(s)
-        failures=[]
-        pending=[q for q in s['questions'] if q.get('analysis',{}).get('status')!='confirmed']
+        gateway = self.gateway()
+        s.update(status='analyzing', error=None)
+        self.store.save_session(s)
+        pending = [q for q in s['questions'] if q.get('analysis', {}).get('status') != 'confirmed'
+                   or q.get('analysis', {}).get('schema_version') != 3]
+        failures = []
+        parallel_for = getattr(gateway, 'parallel_for', None)
+        semaphore = asyncio.Semaphore(parallel_for('solve') if callable(parallel_for) else 1)
 
-        def merge(q,solution,diagnosis):
-            answer=solution.get('answer','')
-            valid=solution.get('valid',True) and solution.get('status','confirmed')!='pending' and diagnosis.get('status','confirmed')!='pending' and bool(answer)
-            supplied=bool(str(q.get('user_answer') or '').strip())
-            correct=normalized_answer(q.get('user_answer'),q['kind'])==normalized_answer(answer,q['kind']) if valid and supplied else None
-            q['analysis']={**diagnosis,'answer':answer,'explanation':solution.get('explanation',''),
-                'correct':correct,'status':'confirmed' if valid and supplied else 'pending','source':'ai'}
-            q['solution']=solution
-            self.store.record_evidence(s['id'],q)
-
-        # One batched solve plus one batched diagnose replaces 2N calls; on
-        # rate-limited accounts that is the difference between minutes and tens of minutes.
-        from .providers import ProviderError
-        solutions={}
-        batch_solve=getattr(gateway,'solve_batch',None)
-        if pending and callable(batch_solve):
-            try:
-                for item in await batch_solve(pending): solutions[item['index']]=item
-            except ProviderError: solutions={}
-            except Exception: raise
-        diag_input=[dict(index=i,question={**q,'reference_material':s.get('references',[])[-5:]},
-            independent_solution={k:solutions[i][k] for k in ('answer','explanation','valid','status')},
-            history=self.related(q)[:3]) for i,q in enumerate(pending) if i in solutions]
-        diagnoses={}
-        batch_diagnose=getattr(gateway,'diagnose_batch',None)
-        if diag_input and callable(batch_diagnose):
-            async def diagnose_batch_with_retry():
-                for attempt in range(2):
-                    try: return await batch_diagnose(diag_input)
-                    except ProviderError:
-                        if attempt: return []
-
-            for item in await diagnose_batch_with_retry(): diagnoses[item['index']]=item
-        remaining=[]
-        for i,q in enumerate(pending):
-            if i in solutions and i in diagnoses:
-                merge(q,solutions[i],diagnoses[i]); self.store.save_session(s)
-            else: remaining.append((q,solutions.get(i)))
-
-        # Concurrency belongs to the selected provider profile so distinct
-        # accounts can progress independently while legacy settings still work.
-        parallel_for=getattr(gateway,'parallel_for',None)
-        parallel=parallel_for('solve') if callable(parallel_for) else int(self.store.settings().get('parallel') or 1)
-        semaphore=asyncio.Semaphore(parallel)
-
-        async def diagnose_question(q,solution=None):
+        async def solve_one(q):
+            self.prepare_question(s, q)
+            context = self.wiki_context(q)
+            task = {**q, 'wiki_context': context, 'reference_note': json.dumps(self.references(s, q['id']), ensure_ascii=False)}
             try:
                 async with semaphore:
-                    if solution is None: solution=await gateway.solve(q)
-                    diagnosis=await gateway.diagnose({**q,'reference_material':s.get('references',[])[-5:]},solution,self.related(q))
-                return q,solution,diagnosis,None
-            except Exception as e:
-                if not isinstance(e,ProviderError): raise
-                return q,None,None,str(e)
-
-        tasks=[]
-        for index,(q,solution) in enumerate(remaining):
-            tasks.append(asyncio.ensure_future(diagnose_question(q,solution)))
-            if parallel>1 and index<len(remaining)-1:
-                await asyncio.sleep(1.5)
-        for future in asyncio.as_completed(tasks):
-            q,solution,diagnosis,error=await future
-            if error:
-                failures.append(str(q.get('number','')))
-                q['analysis']=dict(correct=None,status='pending',source='ai',diagnosis=error,knowledge_point='',hint='请核对题目信息后重试。')
-            else:
-                merge(q,solution,diagnosis)
+                    solution = await gateway.solve(task)
+                self.save_solution(s, q, solution, context)
+            except (ProviderError, ValueError) as exc:
+                q['analysis'] = dict(schema_version=3, status='pending', correct=None, explanation=str(exc),
+                                     answer='', source='model', citations=[], knowledge_status='empty')
+                failures.append(str(q.get('number') or '未编号'))
             self.store.save_session(s)
-        s.update(status='error' if failures else 'ready',error='部分题目未能完成分析，可重试：'+ '、'.join(failures) if failures else None)
-        if not any(m['type']=='overview' for m in s['messages']):
-            s['messages'].append(message('assistant','已完成整页分析。先看总览，再选择想讨论的题目。','overview'))
-        if s['title']=='新的刷题' and s['questions']:
-            s['title']=(s['questions'][0].get('subject') or '整页刷题')+' · '+str(len(s['questions']))+' 题'
+
+        await asyncio.gather(*(solve_one(q) for q in pending))
+        s.update(status='error' if failures else 'ready',
+                 error='部分题目未完成，可重试：' + '、'.join(failures) if failures else None)
+        if not any(m['type'] == 'overview' for m in s['messages']):
+            s['messages'].append(message('assistant', '题目已整理。可以查看讲解、关联知识点，或在之后回顾原题。', 'overview'))
         self.store.save_session(s)
-        return s
+        return self.decorate(s)
 
-    def question(self,s,qid):
-        for q in s['questions']:
-            if q['id']==qid:return q
-        raise ValueError('没有找到这道题。')
+    @staticmethod
+    def is_confirmed(q):
+        a = q.get('analysis') or {}
+        return a.get('schema_version') == 3 and a.get('status') == 'confirmed'
 
-    async def chat(self,s,text,qid=None):
-        if s.get('demo'):
-            s['messages'].extend([message('user',text),message('assistant','这是交互演示，不会调用模型或更新真实知识状态。配置模型后，新建对话上传自己的题目即可开始。')])
-            self.store.save_session(s); return s
-        q=self.question(s,qid) if qid else None
-        s['messages'].append(message('user',text)); s.update(status='chatting',error=None); self.store.save_session(s)
-        visible=public_session(s)
-        context=dict(questions=[x for x in visible['questions'] if x['id']==qid] if q else visible['questions'],
-            history=visible['messages'][-12:],knowledge=self.related(q) if q else [],
-            references=s.get('references',[])[-5:])
-        response=await self.gateway().chat(context,text,s['mode'])
-        action=response.get('action') or {}
-        action_type=action.get('type','none')
-        target=action.get('question_id') or qid
-        if action_type=='train':
-            return await self.train(s,target,action.get('knowledge_id'),action.get('purpose') or 'variant')
-        if action_type=='recheck':
-            return await self.recheck(s,target,action.get('reference') or text)
-        if action_type=='answer_quiz':
-            return await self.answer_quiz(s,action.get('quiz_id'),action.get('answer',''),action.get('reasoning') or '')
-        if action_type=='retry_question':
-            return await self.retry_question(s,target,action.get('answer',''),action.get('reasoning') or '')
-        if action_type in ('reveal','navigate'):
-            selected=self.question(s,target)
-            s['selected_question_id']=selected['id']
-            if action_type=='reveal': selected.update(revealed=True,help_seen=True)
-            s['messages'].append(message('assistant','已打开第 '+str(selected['number'])+' 题。'+('答案与解析已展开。' if action_type=='reveal' else '')))
-        else:
-            s['messages'].append(message('assistant',response['content']))
-            for item in ([q] if q else s['questions']): item['help_seen']=True
-            for m in s['messages']:
-                quiz=m.get('quiz')
-                if quiz and quiz['status']=='ready': quiz['help_kind']='assisted'
-        s.update(status='ready',error=None); self.store.save_session(s); return s
+    @staticmethod
+    def incomplete_question(q):
+        return q.get('incomplete', False) or (q['kind'] in {'single', 'multiple'} and len(q.get('options', [])) < 2)
 
-    async def train(self,s,qid=None,kid=None,purpose='variant'):
-        if s.get('demo'): raise ValueError('演示只展示预设训练；请配置模型后在真实对话中生成。')
-        q=self.question(s,qid) if qid else None
-        k=next((x for x in self.store.knowledge() if x['id']==kid),None) if kid else None
-        if not q and not k: raise ValueError('请先选择题目或知识点。')
-        s.update(status='training',error=None); self.store.save_session(s)
-        context={'question':q,'knowledge':k or (self.related(q) if q else []),'references':s.get('references',[])[-5:]}
-        gateway=self.gateway()
-        for _ in range(2):
-            generated=await gateway.generate(context,purpose)
-            checked=await gateway.verify(generated)
-            kind=generated.get('kind','single')
-            agrees=normalized_answer(generated.get('answer'),kind)==normalized_answer(checked.get('answer'),kind)
-            if kind=='short' and checked.get('valid'):
-                comparison=await gateway.diagnose({**generated,'user_answer':generated.get('answer'),'reasoning':''},checked,[])
-                agrees=comparison.get('correct') is True and comparison.get('status')=='confirmed'
-            if checked.get('valid') and not checked.get('issues') and agrees:
-                if not generated.get('answer'):continue
-                source=dict(question_id=qid,knowledge_id=kid,subject=(q or k or {}).get('subject','未分类'),
-                    chapter=(q or k or {}).get('chapter','未分类'),knowledge=(q or {}).get('knowledge') or (k or {}).get('name','未分类'))
-                if purpose=='prerequisite':
-                    source.update(subject=generated.get('subject') or source['subject'],chapter=generated.get('chapter') or source['chapter'],
-                        knowledge=generated.get('knowledge') or source['knowledge'])
-                helped=bool(q and (q.get('help_seen') or q.get('analysis') or q.get('revealed')))
-                # A just-discussed concept is not an independent delayed retest.
-                if k and any(e.get('session_id')==s['id'] for e in k.get('evidence',[])): helped=True
-                quiz=dict(id=uid(),purpose=purpose,question=generated,status='ready',solution=checked,
-                    source=source,help_kind='assisted' if helped else 'independent')
-                s['messages'].append(message('assistant','只验证当前这个点。答完后由你决定是否继续。','quiz',quiz=quiz))
-                s.update(status='ready',error=None); self.store.save_session(s); return s
-        raise ValueError('这次生成的题目未通过独立复核，已停止。没有计入学习记录，可以稍后重试。')
-
-    async def answer_quiz(self,s,quizid,answer,reasoning=''):
-        quiz=next((m['quiz'] for m in s['messages'] if m.get('quiz',{}).get('id')==quizid),None)
-        if not quiz:raise ValueError('没有找到验证题。')
-        if quiz.get('disputed'):raise ValueError('这道验证题的依据已经失效，请重新发起复核或训练。')
-        if quiz['status']!='ready':raise ValueError('这道验证题已经作答；如需再测，请主动发起新题。')
-        q=quiz['question']; correct=normalized_answer(answer,q['kind'])==normalized_answer(quiz['solution']['answer'],q['kind'])
-        diagnosis=dict(reasoning_ok=None,diagnosis='',error_type='unknown',knowledge_point='本次验证通过。' if correct else '本次验证未通过，具体原因待确认。')
-        if (reasoning or q['kind']=='short') and not s.get('demo'):
-            diagnosis=await self.gateway().diagnose({**q,'user_answer':answer,'reasoning':reasoning},quiz['solution'],[])
-        if q['kind']=='short': correct=diagnosis.get('correct')
-        if diagnosis.get('status')=='pending': correct=None
-        if correct is None: raise ValueError('暂时无法可靠判断这次回答，请补充一句理由再试。')
-        quiz.update(status='answered',answer=answer,correct=correct,reasoning=reasoning,
-            feedback=('✅ 正确。' if diagnosis.get('reasoning_ok') is not False else '选项正确，思路需注意：'+diagnosis.get('diagnosis','')) if correct else
-            ('请再检查关键条件。可查看解析，或继续追问。' if s['mode']=='hint' else '应答 '+quiz['solution']['answer']+'。'+quiz['solution'].get('explanation','')[:160]))
-        evidence_q={**q,**quiz['source'],'id':quizid,'reasoning':reasoning,'confidence':'unknown',
-            'analysis':{**diagnosis,'correct':correct,'status':'confirmed'}}
-        self.store.record_evidence(s['id'],evidence_q,attempt_id=quizid,help_kind=quiz['help_kind'],purpose=quiz['purpose'])
-        s.update(status='ready',error=None);self.store.save_session(s);return s
-
-    async def recheck(self,s,qid,text):
-        if s.get('demo'):raise ValueError('演示记录不进行模型复核。')
-        q=self.question(s,qid)
-        # Disputed judgments are immediately suspended until recheck succeeds.
-        self.store.retract(s['id'],qid)
-        for attempt in q.get('attempts',[]):
-            self.store.retract(s['id'],attempt['id']);attempt['disputed']=True
-        for m in s['messages']:
-            if m.get('quiz',{}).get('source',{}).get('question_id')==qid:
-                self.store.retract(s['id'],m['quiz']['id'])
-                m['quiz']['disputed']=True
-        q['analysis']={'status':'pending','correct':None,'diagnosis':'正在核查用户补充的资料。'}
-        q.pop('solution',None)
-        s['messages'].append(message('user','复核第 '+str(q['number'])+' 题：'+text))
-        s.update(status='analyzing',error=None);self.store.save_session(s)
-        reference_note=json.dumps({'user_note':text,'saved_references':s.get('references',[])[-5:]},ensure_ascii=False)
-        solution=await self.gateway().solve({**q,'reference_note':reference_note})
-        diagnosis=await self.gateway().diagnose(q,solution,self.related(q))
-        valid=solution.get('valid',True) and solution.get('status','confirmed')!='pending' and diagnosis.get('status','confirmed')!='pending' and bool(solution.get('answer'))
-        q['solution']=solution
-        q['analysis']={**diagnosis,'answer':solution.get('answer',''),'explanation':solution.get('explanation',''),
-            'correct': normalized_answer(q['user_answer'],q['kind'])==normalized_answer(solution.get('answer'),q['kind']) if valid else None,
-            'status':'confirmed' if valid else 'pending','source':'ai_rechecked'}
-        self.store.record_evidence(s['id'],q)
-        s['messages'].append(message('assistant','已重新核查并更新本题记录；原判断及依赖它的验证证据已撤回。'+ ('仍有疑点，暂不更新知识判断。' if not valid else '')))
-        s.update(status='ready',error=None);self.store.save_session(s);return s
-
-    async def recheck_quiz(self,s,quizid,text):
-        quiz=next((m['quiz'] for m in s['messages'] if m.get('quiz',{}).get('id')==quizid),None)
-        if not quiz: raise ValueError('验证题不存在。')
-        if s.get('demo'): raise ValueError('演示题不进行实时复核。')
-        self.store.retract(s['id'],quizid)
-        quiz['disputed']=True
-        s.update(status='analyzing',error=None);self.store.save_session(s)
-        reference_note=json.dumps({'user_note':text,'saved_references':s.get('references',[])[-5:]},ensure_ascii=False)
-        checked=await self.gateway().solve({**quiz['question'],'reference_note':reference_note})
-        valid=checked.get('valid') and checked.get('status','confirmed')=='confirmed'
+    def save_solution(self, s, q, solution, context):
+        if self.incomplete_question(q):
+            solution = dict(answer='', valid=False, status='pending',
+                explanation='题干、选项或必要图形不完整，请补全识别内容或重新拍照后核对。')
+        valid = solution.get('valid', True) and solution.get('status', 'confirmed') == 'confirmed'
         if valid:
-            quiz['solution']=checked
-            quiz['disputed']=False
-            if quiz['status']=='answered':
-                answer=quiz['answer'];reasoning=quiz.get('reasoning','')
-                quiz['status']='ready'
-                await self.answer_quiz(s,quizid,answer,reasoning)
-        s['messages'].append(message('assistant','验证题已重新核查，相关记录已更新。' if valid else '验证题仍有疑点，已暂停其学习证据。'))
-        s.update(status='ready',error=None);self.store.save_session(s);return s
+            validate_choice_answer(q['kind'], [Option.model_validate(o) for o in q.get('options', [])], solution['answer'])
+        supplied = bool(q.get('user_answer'))
+        q['analysis'] = dict(schema_version=3, status='confirmed' if valid else 'pending',
+            answer=solution.get('answer', ''), explanation=solution.get('explanation', ''),
+            correct=normalized_answer(q['user_answer'], q['kind']) == normalized_answer(solution.get('answer'), q['kind']) if supplied and valid else None,
+            source='wiki' if context else 'model', citations=self.citations(context),
+            knowledge_status='available' if context else 'empty')
+        self.study.record_solution(s, q)
+        self.store.save_session(s)
 
-    async def retry_question(self,s,qid,answer,reasoning=''):
-        q=self.question(s,qid)
-        solution=q.get('solution') or q.get('analysis') or {}
-        if not solution.get('answer') or q.get('analysis',{}).get('status')!='confirmed':
-            raise ValueError('这道题的答案尚未确认，请先完成分析或复核。')
-        correct=normalized_answer(answer,q['kind'])==normalized_answer(solution['answer'],q['kind'])
-        diagnosis=dict(reasoning_ok=None,diagnosis='',knowledge_point='本次重答记录。')
-        if reasoning and not s.get('demo'):
-            diagnosis=await self.gateway().diagnose({**q,'user_answer':answer,'reasoning':reasoning},solution,self.related(q))
-        if diagnosis.get('status')=='pending':
-            raise ValueError('这次思路暂时无法可靠判断，请补充信息后再确认；未更新知识状态。')
-        attempt=dict(id=uid(),answer=answer,reasoning=reasoning,correct=correct,help_kind='assisted')
-        q.setdefault('attempts',[]).append(attempt)
-        evidence_q={**q,'id':attempt['id'],'reasoning':reasoning,
-            'analysis':{**diagnosis,'correct':correct,'status':'confirmed'}}
-        self.store.record_evidence(s['id'],evidence_q,help_kind='assisted',purpose='retry')
-        s['messages'].append(message('user','第 '+str(q['number'])+' 题重答：'+answer+('；'+reasoning if reasoning else '')))
-        s['messages'].append(message('assistant','✅ 这次答对了。首答与提示后重答已分别记录。' if correct else '这次仍未答对。可以继续追问具体卡点，或查看答案。'))
-        s.update(status='ready',error=None);self.store.save_session(s);return s
+    async def solve_group(self, s, questions, gateway):
+        """Batch only independent question snapshots; retry only absent/invalid rows."""
+        complete = []
+        for q in questions:
+            if self.incomplete_question(q):
+                self.save_solution(s, q, {}, [])
+            else:
+                complete.append(q)
+        questions = complete
+        tasks, contexts = [], []
+        for q in questions:
+            self.prepare_question(s, q)
+            context = self.wiki_context(q)
+            contexts.append(context)
+            tasks.append(copy.deepcopy({**q, 'wiki_context': context,
+                'reference_note': json.dumps(self.references(s, q['id']), ensure_ascii=False)}))
+        rows = {}
+        if len(tasks) > 1 and callable(getattr(gateway, 'solve_batch', None)):
+            try:
+                result = await gateway.solve_batch(tasks)
+                duplicates = set()
+                for row in result:
+                    index = row.get('index')
+                    if not isinstance(index, int) or not 0 <= index < len(tasks):
+                        continue
+                    if not row.get('valid', True) or row.get('status', 'confirmed') != 'confirmed':
+                        continue
+                    if index in rows:
+                        duplicates.add(index)
+                    rows[index] = row
+                for index in duplicates:
+                    rows.pop(index, None)
+            except ProviderError:
+                pass  # One bounded individual retry per item, never restart successes.
+        for index, q in enumerate(questions):
+            if index in rows:
+                try:
+                    self.save_solution(s, q, rows[index], contexts[index])
+                    continue
+                except (ValueError, KeyError):
+                    pass
+            try:
+                solution = await gateway.solve(tasks[index])
+                self.save_solution(s, q, solution, contexts[index])
+            except (ProviderError, ValueError) as exc:
+                q['analysis'] = dict(schema_version=3, status='pending', correct=None, answer='',
+                    explanation=str(exc), source='model', citations=[], knowledge_status='empty')
+                self.store.save_session(s)
+
+    def reveal(self, s, qid):
+        q = self.question(s, qid)
+        if not self.is_confirmed(q):
+            raise ValueError('请先完成题目核对，再查看解析')
+        q.update(revealed=True, help_seen=True)
+        self.study.mark_viewed(s['id'], qid)
+        self.store.save_session(s)
+        return self.decorate(s)
+
+    @staticmethod
+    def references(s, qid=None):
+        return [r for r in s.get('references', []) if not r.get('question_id') or r.get('question_id') == qid][-5:]
+
+    @staticmethod
+    def thread_messages(s, q=None):
+        return [m for m in s['messages'] if m.get('question_id') == (q or {}).get('id')
+                and (not q or m.get('question_revision') == q.get('revision', 1))]
+
+    async def hint(self, s, qid):
+        q=self.question(s, qid)
+        if q.get('analysis', {}).get('status') != 'confirmed' or q.get('analysis', {}).get('schema_version') != 3:
+            raise ValueError('请先完成题目核对，再获取提示')
+        if any(m['type']=='hint' for m in self.thread_messages(s, q)):
+            q['help_seen']=True
+            self.study.mark_viewed(s['id'], qid)
+            s.update(status='ready', error=None)
+            self.store.save_session(s)
+            return self.decorate(s)
+        return await self.chat(s, '先给我一点提示，不要直接告诉我答案。', qid, hint=True)
+
+    async def chat(self, s, text, qid=None, kid=None, hint=False):
+        async for event in self.chat_events(s, text, qid, kid, hint, stream=False):
+            if event['type'] == 'done':
+                return event['session']
+
+    async def chat_events(self, s, text, qid=None, kid=None, hint=False, stream=True):
+        q = self.question(s, qid) if qid else None
+        if s.get('processing') and (not q or not self.is_confirmed(q)):
+            raise ValueError('后台整理期间，请先选择已完成核对的题目进行讨论')
+        context = self.wiki_context(q, text, kid)
+        thread=self.thread_messages(s, q)
+        hint_only=bool(hint or (q and not q.get('revealed') and thread and thread[-1].get('hint_only')))
+        tags=dict(question_id=qid, question_revision=q.get('revision', 1) if q else None, hint_only=hint_only)
+        if not s.get('processing'):
+            s.update(status='chatting', error=None)
+        s['messages'].append(message('user', text, **tags))
+        self.store.save_session(s)
+        related_ids = [n['id'] for n in context]
+        if kid and kid not in related_ids:
+            related_ids.append(kid)
+        visible_questions=public_session(s)['questions']
+        for item in visible_questions:
+            if item.get('legacy'):
+                item.pop('analysis', None)
+        payload = dict(
+            questions=[item for item in visible_questions if item['id']==qid] if q else visible_questions,
+            history=self.thread_messages(s, q)[-12:], wiki_context=context, hint_only=hint_only,
+            learning=[dict(knowledge_id=k, **self.study.learning(k)) for k in related_ids],
+            references=self.references(s, qid))
+        # Freeze model context before background work can append later questions/results.
+        payload = copy.deepcopy(payload)
+        affected = list([q] if q else s['questions'])
+        exposed = False
+        complete = False
+
+        def expose():
+            nonlocal exposed
+            if exposed:
+                return
+            for item in affected:
+                item['help_seen'] = True
+                self.study.mark_viewed(s['id'], item['id'])
+            exposed = True
+            self.store.save_session(s)
+
+        try:
+            gateway = self.gateway()
+            if stream and not hint_only and callable(getattr(gateway, 'stream_chat', None)):
+                parts = []
+                async for part in gateway.stream_chat(payload, text, 'direct'):
+                    if part:
+                        expose()
+                        parts.append(part)
+                        yield {'type': 'delta', 'text': part}
+                content = ''.join(parts)
+                if not content.strip():
+                    raise ProviderError('模型没有返回讲解，请重试', 'response_schema')
+            else:
+                reply = await gateway.chat(payload, text, 'hint' if hint_only else 'direct')
+                content = reply['content']
+                if hint_only:
+                    import re
+                    if re.search(r'(?:答案|选择|选项|应选|选)\s*(?:是|为|：|:)?\s*[A-H](?![a-z])', content):
+                        content='先检查题目给定条件与相关概念的适用范围，再尝试下一步推导。需要完整说明时可以点击“查看解析”。'
+                expose()
+                if stream:
+                    yield {'type': 'delta', 'text': content}
+            s['messages'].append(message('assistant', content, 'hint' if hint else 'text', citations=self.citations(context),
+                                        knowledge_status='available' if context else 'empty', **tags))
+            if s['status'] == 'chatting':
+                s.update(status='ready', error=None)
+            s.pop('chat_error', None)
+            self.store.save_session(s)
+            complete = True
+            yield {'type': 'done', 'session': self.decorate(s)}
+        finally:
+            if not complete:
+                s['chat_error'] = '讲解未完整返回，可重新追问；已看到的内容计为获得帮助。' if exposed else '讲解未完成，可重新追问。'
+                if s['status'] == 'chatting':
+                    s.update(status='ready')
+                self.store.save_session(s)
+
+    def invalidate(self, s, q):
+        self.study.invalidate(s['id'], q['id'])
+        self.store.retract(s['id'], q['id'])
+        q['revision'] = q.get('revision', 1) + 1
+        q.pop('analysis', None)
+        q.pop('solution', None)
+        q['revealed'] = False
+        # Do not erase prior exposure when an answer or transcript is corrected.
+        q.setdefault('help_seen', False)
+
+    async def recheck(self, s, qid, text):
+        q = self.question(s, qid)
+        self.invalidate(s, q)
+        s.setdefault('references', []).append(dict(id=uid(), text=text, question_id=qid))
+        self.store.save_session(s)
+        return await self.analyze(s)
+
+    async def retry_question(self, s, qid, answer):
+        q = self.question(s, qid)
+        a = q.get('analysis', {})
+        if a.get('schema_version') != 3 or a.get('status') != 'confirmed':
+            raise ValueError('请先完成题目解答或复核')
+        validate_choice_answer(q['kind'], [Option.model_validate(o) for o in q.get('options', [])], answer)
+        correct = normalized_answer(answer, q['kind']) == normalized_answer(a['answer'], q['kind'])
+        help_kind = 'assisted' if q.get('help_seen') or q.get('revealed') or q.get('user_answer') else 'independent'
+        self.study.event(s['id'], qid, 'answer', correct=correct, help_kind=help_kind, next_due_at=later(1))
+        q.setdefault('attempts', []).append(dict(id=uid(), answer=answer, correct=correct, help_kind=help_kind))
+        q.update(revealed=True, help_seen=True)
+        self.study.mark_viewed(s['id'], qid)
+        # The original answer is immutable; this response is a separate attempt.
+        s['messages'].append(message('assistant', ('本次答对。' if correct else '本次答错，可查看讲解。') +
+                                    (' 已记录为得到帮助后的作答。' if help_kind == 'assisted' else ' 已记录本次作答。'),
+                                    question_id=qid, question_revision=q.get('revision', 1)))
+        self.store.save_session(s)
+        return self.decorate(s)

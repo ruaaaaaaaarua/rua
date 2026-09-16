@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .store import Store, TASKS, message, uid
 from .service import LearningService, public_session
-from .demo import create_demo
+from .images import normalize_image, MAX_INPUT_BYTES
+from .jobs import StudyJobs
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -22,16 +23,17 @@ class Input(BaseModel):
     model_config=ConfigDict(extra='forbid')
 
 class SessionInput(Input):
-    title: str=Field(default='新的刷题',max_length=100)
-    mode: Optional[Literal['direct','hint']]=None
+    title: str=Field(default='新的学习',max_length=100)
+    mode: Optional[Literal['direct']]=None
 
 class SessionPatch(Input):
     title: Optional[str]=Field(default=None,max_length=100)
-    mode: Optional[Literal['direct','hint']]=None
+    mode: Optional[Literal['direct']]=None
 
 class Text(Input):
     text: str=Field(min_length=1,max_length=30000)
     question_id: Optional[str]=None
+    knowledge_id: Optional[str]=None
 
 class Option(Input):
     key:str=Field(min_length=1,max_length=8)
@@ -41,18 +43,18 @@ class QuestionPatch(Input):
     text:Optional[str]=Field(default=None,min_length=1,max_length=20000)
     options:Optional[List[Option]]=None
     user_answer:Optional[str]=Field(default=None,max_length=200)
-    reasoning:Optional[str]=Field(default=None,max_length=10000)
-    confidence:Optional[Literal['certain','unsure','guess','unknown']]=None
     kind:Optional[Literal['single','multiple','judge']]=None
-
-class Train(Input):
-    question_id:Optional[str]=None
-    knowledge_id:Optional[str]=None
-    purpose:Literal['variant','verify','prerequisite','depth']='variant'
+    completeness_confirmed:bool=False
 
 class Answer(Input):
     answer:str=Field(min_length=1,max_length=200)
-    reasoning:str=Field(default='',max_length=10000)
+
+class Links(Input):
+    knowledge_ids:List[str]=Field(max_length=20)
+
+class ReviewStart(Input):
+    session_id:str
+    question_id:str
 
 class Profile(Input):
     id:str=Field(default='',max_length=100)
@@ -78,29 +80,39 @@ class Profile(Input):
 class Settings(Input):
     profiles:List[Profile]=Field(max_length=20)
     tasks:Dict[str,str]
-    mode:Literal['direct','hint']='direct'
+    mode:Literal['direct']='direct'
     rate_tpm:Optional[int]=Field(default=None,ge=1000,le=10000000)
     parallel:Optional[int]=Field(default=None,ge=1,le=8)
 
     @field_validator('tasks')
     @classmethod
     def task_names(cls,v):
-        if set(v)!=set(TASKS):raise ValueError('需要配置 vision/solve/chat/generate/verify 五个任务')
+        if set(v)!=set(TASKS):raise ValueError('需要配置 vision/solve/chat 三个任务')
         return v
 
 class TestProfile(Input):
     profile_id:str
 
 
-def create_app(data_dir=None,gateway_factory=None):
+def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
     store=Store(data_dir or os.environ.get('GRID_LEARNING_DATA',ROOT/'data'))
     if gateway_factory is None:
         from .providers import ModelGateway
         gateway_factory=ModelGateway
-    service=LearningService(store,gateway_factory)
-    app=FastAPI(title='电网学习助手',docs_url='/api/docs',openapi_url='/api/openapi.json')
+    service=LearningService(store,gateway_factory,knowledge_dir)
+    jobs=StudyJobs(service)
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        await jobs.close()
+    app=FastAPI(title='电力系统分析 · 学习工作台',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
     app.state.store=store;app.state.service=service
+    app.state.jobs=jobs
     locks={}
+
+    @app.exception_handler(ValueError)
+    async def invalid_operation(request,exc):
+        return JSONResponse({'detail':str(exc)},status_code=400)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_input(request,exc):
@@ -128,18 +140,26 @@ def create_app(data_dir=None,gateway_factory=None):
         return response
 
     def get(sid):
-        s=store.get_session(sid)
+        s=jobs.session(sid) or store.get_session(sid)
         if not s:raise HTTPException(404,'没有找到这次刷题')
-        return s
+        s['processing']=bool(jobs.session(sid))
+        return service.decorate(s)
 
     @asynccontextmanager
-    async def locked(sid):
+    async def locked(sid, background=False):
         lock=locks.setdefault(sid,asyncio.Lock())
         if lock.locked():raise HTTPException(409,'当前对话正在处理，请等待完成。')
-        async with lock:yield get(sid)
+        if not background and jobs.session(sid):
+            raise HTTPException(409,'后台正在整理题目；已完成的题目可以查看、提示和追问，编辑请稍后。')
+        async with lock:
+            jobs.interactive_start()
+            try:
+                yield get(sid)
+            finally:
+                jobs.interactive_end()
 
-    async def operation(sid,fn):
-        async with locked(sid) as s:
+    async def operation(sid,fn,background=False):
+        async with locked(sid,background=background) as s:
             try:return public_session(await fn(s))
             except (ValueError,) as e:
                 s.update(status='error',error=str(e));store.save_session(s)
@@ -160,17 +180,11 @@ def create_app(data_dir=None,gateway_factory=None):
     def new_session(body:SessionInput):return public_session(store.create_session(body.title,body.mode))
 
     @app.get('/api/sessions/{sid}')
-    def session(sid:str):return public_session(get(sid))
+    async def session(sid:str):return public_session(get(sid))
 
     @app.patch('/api/sessions/{sid}')
     async def update_session(sid:str,body:SessionPatch):
-        async with locked(sid) as s:
-            if body.mode:
-                if s['mode']=='direct' or body.mode=='direct':
-                    for q in s['questions']:
-                        if q.get('analysis',{}).get('status')=='confirmed':
-                            q.update(revealed=True,help_seen=True)
-                preferences=store.settings();preferences['mode']=body.mode;store.save_settings(preferences)
+        async with locked(sid,background=True) as s:
             s.update(body.model_dump(exclude_none=True));store.save_session(s);return public_session(s)
 
     @app.delete('/api/sessions/{sid}')
@@ -183,21 +197,19 @@ def create_app(data_dir=None,gateway_factory=None):
     async def upload(sid:str,files:List[UploadFile]=File(...)):
         async with locked(sid) as s:
             if s.get('demo'):raise HTTPException(400,'请新建真实对话上传图片。')
-            if len(files)>12 or len(files)+len(s['attachments'])>24:raise HTTPException(400,'一次最多 12 张，每次对话最多 24 张图片。')
+            if len(files)>12:raise HTTPException(400,f'本次选择了 {len(files)} 张图片，一次最多上传 12 张。')
+            if len(files)+len([a for a in s['attachments'] if not a.get('deleted')])>24:
+                raise HTTPException(400,'这次学习已达到 24 张图片上限，请新建学习或清理不再需要的原图。')
             staged=[]
             for f in files:
-                raw=await f.read(12*1024*1024+1)
-                if len(raw)>12*1024*1024:raise HTTPException(400,'每张图片最大 12 MB。')
-                mime=f.content_type
-                valid=(mime=='image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n') or
-                    mime=='image/jpeg' and raw.startswith(b'\xff\xd8\xff') or
-                    mime=='image/webp' and raw[:4]==b'RIFF' and raw[8:12]==b'WEBP')
-                if not valid:raise HTTPException(400,'请上传 PNG、JPEG 或 WebP 图片；PDF 页面请先截图。')
-                aid=uid();staged.append((dict(id=aid,name=Path(f.filename or '题目图片').name[:150],url='/api/attachments/'+aid,mime=mime,extracted=False),raw))
+                raw=await f.read(MAX_INPUT_BYTES+1)
+                try: raw,mime,name=await asyncio.to_thread(normalize_image,raw,f.filename)
+                except ValueError as exc:raise HTTPException(400,str(exc))
+                aid=uid();staged.append((dict(id=aid,name=name,original_name=Path(f.filename or name).name[:150],url='/api/attachments/'+aid,mime=mime,extracted=False),raw))
             for attachment,raw in staged:
                 target=store.attachments/attachment['id'];target.write_bytes(raw);os.chmod(target,0o600)
                 s['attachments'].append(attachment)
-            s['messages'].append(message('user','上传了 '+str(len(staged))+' 张已作答题目图片。'))
+            s['messages'].append(message('user','上传了 '+str(len(staged))+' 张题目图片。'))
             store.save_session(s);return public_session(s)
 
     @app.get('/api/attachments/{aid}')
@@ -219,6 +231,11 @@ def create_app(data_dir=None,gateway_factory=None):
 
     @app.post('/api/sessions/{sid}/analyze')
     async def analyze(sid:str):return await operation(sid,service.analyze)
+
+    @app.post('/api/sessions/{sid}/process')
+    async def process(sid:str):
+        async with locked(sid,background=True) as s:
+            return public_session(jobs.start(s))
 
     @app.post('/api/sessions/{sid}/extract')
     async def extract(sid:str):return await operation(sid,service.extract)
@@ -248,50 +265,64 @@ def create_app(data_dir=None,gateway_factory=None):
         return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-store'})
 
     @app.post('/api/sessions/{sid}/messages')
-    async def chat(sid:str,body:Text):return await operation(sid,lambda s:service.chat(s,body.text,body.question_id))
+    async def chat(sid:str,body:Text):return await operation(sid,lambda s:service.chat(s,body.text,body.question_id,body.knowledge_id),background=True)
+
+    @app.post('/api/sessions/{sid}/messages-stream')
+    async def chat_stream(sid:str,body:Text):
+        def sse(event):
+            return 'event: '+event['type']+'\ndata: '+json.dumps(event,ensure_ascii=False,separators=(',',':'))+'\n\n'
+        async def events():
+            try:
+                async with locked(sid,background=True) as s:
+                    async for event in service.chat_events(s,body.text,body.question_id,body.knowledge_id):
+                        if event['type']=='done':
+                            event={**event,'session':public_session(event['session'])}
+                        yield sse(event)
+            except HTTPException as exc:
+                yield sse({'type':'error','message':str(exc.detail)})
+            except Exception as exc:
+                from .providers import ProviderError
+                safe=str(exc) if isinstance(exc,(ValueError,ProviderError)) else '讲解未完整返回，请重试。'
+                yield sse({'type':'error','message':safe})
+        return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-store','X-Accel-Buffering':'no'})
 
     @app.patch('/api/sessions/{sid}/questions/{qid}')
     async def edit_question(sid:str,qid:str,body:QuestionPatch):
         async with locked(sid) as s:
-            q=service.question(s,qid);q.update(body.model_dump(exclude_none=True))
-            q.pop('analysis',None);q.pop('solution',None);q['revealed']=False
-            store.retract(sid,qid)
-            for attempt in q.get('attempts',[]):
-                store.retract(sid,attempt['id']);attempt['disputed']=True
-            for m in s['messages']:
-                if m.get('quiz',{}).get('source',{}).get('question_id')==qid:
-                    store.retract(sid,m['quiz']['id']);m['quiz']['disputed']=True
+            q=service.question(s,qid)
+            old_text=q.get('text')
+            service.invalidate(s,q)
+            q.update(body.model_dump(exclude_none=True,exclude={'completeness_confirmed'}))
+            if body.completeness_confirmed:
+                q['incomplete']=False
+            if body.text is not None and body.text != old_text:
+                # OCR labels belong to the old transcript. Do not carry them into a new match.
+                q['knowledge']='待归类'
+                q['links_managed']=False
+            service.prepare_question(s,q)
             store.save_session(s);return public_session(s)
 
     @app.post('/api/sessions/{sid}/questions/{qid}/reveal')
     async def reveal(sid:str,qid:str):
+        async with locked(sid,background=True) as s:
+            return public_session(service.reveal(s,qid))
+
+    @app.put('/api/sessions/{sid}/questions/{qid}/links')
+    async def attach(sid:str,qid:str,body:Links):
         async with locked(sid) as s:
-            q=service.question(s,qid);q.update(revealed=True,help_seen=True);store.save_session(s)
+            q=service.question(s,qid)
+            try: service.study.attach(s,q,body.knowledge_ids)
+            except ValueError as exc: raise HTTPException(422,str(exc))
+            service.decorate(s);store.save_session(s)
             return public_session(s)
-
-    @app.post('/api/sessions/{sid}/train')
-    async def train(sid:str,body:Train):
-        return await operation(sid,lambda s:service.train(s,body.question_id,body.knowledge_id,body.purpose))
-
-    @app.post('/api/sessions/{sid}/quiz/{quizid}/answer')
-    async def answer(sid:str,quizid:str,body:Answer):
-        return await operation(sid,lambda s:service.answer_quiz(s,quizid,body.answer,body.reasoning))
-
-    @app.post('/api/sessions/{sid}/quiz/{quizid}/reveal')
-    async def reveal_quiz(sid:str,quizid:str):
-        async with locked(sid) as s:
-            quiz=next((m['quiz'] for m in s['messages'] if m.get('quiz',{}).get('id')==quizid),None)
-            if not quiz:raise HTTPException(404,'验证题不存在。')
-            quiz.update(revealed=True,help_kind='assisted')
-            store.save_session(s);return public_session(s)
-
-    @app.post('/api/sessions/{sid}/quiz/{quizid}/recheck')
-    async def recheck_quiz(sid:str,quizid:str,body:Text):
-        return await operation(sid,lambda s:service.recheck_quiz(s,quizid,body.text))
 
     @app.post('/api/sessions/{sid}/questions/{qid}/retry')
     async def retry_question(sid:str,qid:str,body:Answer):
-        return await operation(sid,lambda s:service.retry_question(s,qid,body.answer,body.reasoning))
+        return await operation(sid,lambda s:service.retry_question(s,qid,body.answer),background=True)
+
+    @app.post('/api/sessions/{sid}/questions/{qid}/hint')
+    async def hint(sid:str,qid:str):
+        return await operation(sid,lambda s:service.hint(s,qid),background=True)
 
     @app.post('/api/sessions/{sid}/questions/{qid}/recheck')
     async def recheck(sid:str,qid:str,body:Text):
@@ -302,7 +333,7 @@ def create_app(data_dir=None,gateway_factory=None):
         async with locked(sid) as s:
             s.setdefault('references',[]).append(dict(id=uid(),text=body.text))
             s['messages'].append(message('user','补充参考资料：\n'+body.text))
-            s['messages'].append(message('assistant','已保存参考资料，将用于后续相关讨论与训练。若涉及原判定错误，请选择题目并发起复核。'))
+            s['messages'].append(message('assistant','已保存参考资料，将用于后续相关讨论。若涉及原判定错误，请选择题目并发起复核。'))
             store.save_session(s);return public_session(s)
 
     @app.post('/api/sessions/{sid}/reference-upload')
@@ -332,11 +363,45 @@ def create_app(data_dir=None,gateway_factory=None):
             s['messages'].append(message('user','补充资料截图（识别结果可作为后续参考）：\n'+result['content']))
             store.save_session(s);return public_session(s)
 
+    @app.get('/api/wiki')
+    def wiki(q:str=''):
+        return service.library.listing(q)
+
+    @app.get('/api/wiki/{kid}')
+    def wiki_node(kid:str):
+        try: node=service.library.get(kid)
+        except ValueError as exc: raise HTTPException(404,str(exc))
+        return {**node,'questions':service.study.questions(kid),'learning':service.study.learning(kid)}
+
     @app.get('/api/knowledge')
-    def knowledge():return store.knowledge()
+    def knowledge():
+        return [dict(id=n['id'],name=n['name'],subject='电力系统分析',chapter=n['chapter_id'],
+                     **service.study.learning(n['id'])) for n in service.library.catalog()['nodes']]
 
     @app.get('/api/framework')
-    def framework():return dict(subjects=['电路','电机学','电力系统分析','继电保护','高电压技术','电气设备','其他专业科目'],note='通用科目框架；具体章节与知识点随刷题积累，可通过参考资料补充考试范围。')
+    def framework():
+        return dict(subjects=['电力系统分析'],chapters=service.library.catalog()['chapters'],
+                    note='章节与知识点骨架；正文待维护者填充。')
+
+    @app.get('/api/reviews')
+    def reviews():
+        return service.study.queue()
+
+    @app.post('/api/reviews/start')
+    async def start_review(body:ReviewStart):
+        async with locked(body.session_id):
+            try: return service.study.start(body.session_id,body.question_id)
+            except ValueError as exc: raise HTTPException(400,str(exc))
+
+    @app.post('/api/reviews/{rid}/reveal')
+    async def reveal_review(rid:str):
+        async with locked(service.study.run_session(rid)):
+            return service.study.review(rid)
+
+    @app.post('/api/reviews/{rid}/answer')
+    async def answer_review(rid:str,body:Answer):
+        async with locked(service.study.run_session(rid)):
+            return service.study.review(rid,body.answer)
 
     @app.get('/api/settings')
     def settings():return store.settings(public=True)
@@ -356,9 +421,6 @@ def create_app(data_dir=None,gateway_factory=None):
             return {'ok':True,'message':'连接成功，已收到并校验模型响应。'}
         except Exception:
             return {'ok':False,'message':'连接未通过。请核对接口地址、模型名称、密钥及结构化输出支持情况。'}
-
-    @app.post('/api/demo')
-    def demo():return public_session(create_demo(store))
 
     dist=ROOT/'web'/'dist'
     if (dist/'assets').exists():app.mount('/assets',StaticFiles(directory=dist/'assets'),name='assets')
