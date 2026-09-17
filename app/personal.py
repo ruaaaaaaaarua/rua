@@ -1,5 +1,14 @@
 """Bounded personal projection and history retrieval."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from .classification import group_key
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def local_day(value):
+    return datetime.fromisoformat(value).astimezone(SHANGHAI).date().isoformat()
 
 
 def linked_ids(study, sessions):
@@ -50,8 +59,8 @@ def related_history(store, study, session_id, question, limit=2):
                 "revision": other.get("revision", 1), "title": session.get("title", "历史学习"),
                 "text": other.get("text", "")[:300],
                 "state": study.summary(events)["state"],
-                "earlier_errors": [{"date": e["created_at"][:10]} for e in errors[-2:]],
-                "latest_improvement": ({"date": successes[-1]["created_at"][:10],
+                "earlier_errors": [{"date": local_day(e["created_at"])} for e in errors[-2:]],
+                "latest_improvement": ({"date": local_day(successes[-1]["created_at"]),
                                         "help_kind": successes[-1].get("help_kind", "unknown")}
                                        if successes else None),
                 "source_url": f"/sessions/{session['id']}?question={other['id']}",

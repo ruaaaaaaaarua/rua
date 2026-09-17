@@ -168,6 +168,7 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
 
     @asynccontextmanager
     async def locked(sid, background=False):
+        if organizing:raise HTTPException(409,'AI 正在整理历史题目，请稍后再修改或讨论。')
         lock=locks.setdefault(sid,asyncio.Lock())
         if lock.locked():raise HTTPException(409,'当前对话正在处理，请等待完成。')
         if not background and jobs.session(sid):
@@ -432,7 +433,8 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
     @app.post('/api/reviews/organize')
     async def organize_reviews(body:Organize):
         nonlocal organizing
-        if jobs.active or organizing:raise HTTPException(409,'后台整理期间暂不能重新分类。')
+        if jobs.active or organizing or any(lock.locked() for lock in locks.values()):
+            raise HTTPException(409,'后台处理或交互期间暂不能重新分类。')
         organizing=True
         try:return await service.organize(body.question_ids)
         finally:organizing=False

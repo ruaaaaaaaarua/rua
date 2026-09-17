@@ -146,6 +146,7 @@ Full backend regression and knowledge validation:
 
 - No live provider call was made. Classification quality and confidence thresholds are controlled-contract behavior tested with deterministic fakes; model estimates are not calibrated and real-model grouping quality still requires observation.
 - Organization reuses the existing structured solve response to obtain classification, so it also asks the provider to solve the selected originals; only validated classification is committed.
+- While organization is running, new solve jobs, edits, links, classification changes, hints, reviews, and chats are rejected with `409`; organization also refuses to start while an existing session interaction or background job is active. This deliberately creates a short local maintenance window so whole-session JSON writes cannot race.
 - This remains a local single-user privacy boundary, not a multi-tenant authorization system.
 
 ## Commit

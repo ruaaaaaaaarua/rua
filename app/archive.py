@@ -41,15 +41,15 @@ class Archive:
                 base = {"session_id": session["id"], "question_id": q["id"], "revision": revision}
                 events = self.study.events(session["id"], q["id"])
                 source = next((e for e in events if e["kind"] in ("observed_answer", "saved")), None)
-                if self.study.links(session["id"], q["id"]):
-                    date = (source or {"created_at": session.get("created_at", "")}).get("created_at", "")[:10]
-                    evidence["first_connection"].append({**base, "date": date})
                 if not source:
                     continue
                 current_versions = {n['id']: n['version'] for n in self.study.library.catalog()['nodes']}
                 recorded_versions = source.get('core_versions', {})
                 if source.get('revision') != revision or any(current_versions.get(k) != v for k, v in recorded_versions.items()):
                     continue
+                if self.study.links(session["id"], q["id"]):
+                    evidence["first_connection"].append(
+                        {**base, "date": local_day(source["created_at"]).isoformat()})
                 source_day = local_day(source["created_at"])
                 later_reviews = [e for e in events if e["kind"] == "review_answer" and e.get("correct")
                                  and e.get("help_kind") == "independent" and local_day(e["created_at"]) > source_day]

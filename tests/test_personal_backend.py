@@ -281,6 +281,12 @@ def test_same_day_review_does_not_earn_cross_day_medal_and_edit_revokes_source(t
         db.execute("UPDATE study_events SET data=? WHERE id=?", (json.dumps(data), rows[-1]["id"]))
     medals = {m["id"]: m for m in c.get("/api/archive").json()["medals"]}
     assert medals["next_day"]["earned"] is True and medals["reconnected"]["earned"] is True
+    with app.state.store.connect() as db:
+        row = db.execute("SELECT id,data FROM study_events WHERE id LIKE 'source:%'").fetchone()
+        data = json.loads(row["data"]); data["core_versions"] = {"psa-per-unit": "stale-version"}
+        db.execute("UPDATE study_events SET data=? WHERE id=?", (json.dumps(data), row["id"]))
+    medals = {m["id"]: m for m in c.get("/api/archive").json()["medals"]}
+    assert medals["first_connection"]["earned"] is False
     c.patch(f"/api/sessions/{sid}/questions/q1", json={"text": "edited"})
     medals = {m["id"]: m for m in c.get("/api/archive").json()["medals"]}
     assert medals["first_connection"]["earned"] is False
@@ -345,6 +351,8 @@ def test_organize_blocks_a_new_background_job_while_model_is_in_flight(tmp_path)
             pending = asyncio.create_task(client.post("/api/reviews/organize", json={}))
             await started.wait()
             blocked = await client.post(f"/api/sessions/{sid}/process")
+            blocked_chat = await client.post(f"/api/sessions/{sid}/messages", json={"text":"concurrent"})
             release.set(); finished = await pending
-        assert blocked.status_code == 409 and finished.json()["classified"] == 1
+        assert blocked.status_code == 409 and blocked_chat.status_code == 409
+        assert finished.json()["classified"] == 1
     asyncio.run(scenario())
