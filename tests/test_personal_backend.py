@@ -231,16 +231,41 @@ def test_deleted_or_revised_history_is_not_resurrected(tmp_path):
     c.post(f"/api/sessions/{sid}/analyze")
     s = app.state.store.get_session(sid)
     q2 = copy.deepcopy(s["questions"][0]); q2.update(id="q2", revision=1)
-    s["questions"].append(q2); app.state.store.save_session(s)
+    q3 = copy.deepcopy(s["questions"][0]); q3.update(id="q3", revision=1, text="still valid history")
+    s["questions"].extend([q2, q3]); app.state.store.save_session(s)
     app.state.service.study.attach(s, q2, ["psa-per-unit"])
+    app.state.service.study.attach(s, q3, ["psa-per-unit"])
     c.post(f"/api/sessions/{sid}/analyze")
     c.post(f"/api/sessions/{sid}/questions/q1/reveal")
+    async def marker_chat(context, text, mode):
+        gateway.inputs.append(copy.deepcopy(context))
+        return {"content": "STALE_HISTORY_MARKER"}
+    gateway.chat = marker_chat
     c.post(f"/api/sessions/{sid}/messages", json={"text": "explain", "question_id": "q1"})
     assert c.get(f"/api/sessions/{sid}").json()["questions"][0]["related_history"]
-    changed = app.state.store.get_session(sid)
-    changed["questions"][1]["revision"] += 1
-    app.state.store.save_session(changed)
-    assert c.get(f"/api/sessions/{sid}").json()["questions"][0]["related_history"] == []
+    internal = app.state.store.get_session(sid)
+    assistant = [m for m in internal["messages"] if m.get("content") == "STALE_HISTORY_MARKER"][0]
+    assert {item["question_id"] for item in assistant["retrieval_audit"]["history"]} == {"q2", "q3"}
+    assert set(assistant["retrieval_audit"]["provider"]) == {"id", "name", "model"}
+    async def dependent_chat(context, text, mode):
+        gateway.inputs.append(copy.deepcopy(context))
+        return {"content": "DEPENDENT_MARKER"}
+    gateway.chat = dependent_chat
+    c.post(f"/api/sessions/{sid}/messages", json={"text": "continue", "question_id": "q1"})
+    dependent = [m for m in app.state.store.get_session(sid)["messages"]
+                 if m.get("content") == "DEPENDENT_MARKER"][0]
+    assert assistant["id"] in dependent["retrieval_audit"]["context_message_ids"]
+    c.patch(f"/api/sessions/{sid}/questions/q2", json={"text": "revised source"})
+    gateway.inputs.clear()
+    c.post(f"/api/sessions/{sid}/messages", json={"text": "explain again", "question_id": "q1"})
+    payload = gateway.inputs[-1]
+    assert "STALE_HISTORY_MARKER" not in json.dumps(payload) and "DEPENDENT_MARKER" not in json.dumps(payload)
+    assert "q2" not in json.dumps(payload)
+    assert [item["question_id"] for item in payload["related_history"]] == ["q3"]
+    latest = [m for m in app.state.store.get_session(sid)["messages"] if m["role"] == "assistant"][-1]
+    assert latest["retrieval_audit"]["history"][0]["question_id"] == "q3"
+    public = c.get(f"/api/sessions/{sid}").json()
+    assert "retrieval_audit" not in json.dumps(public) and "api_key" not in json.dumps(public)
 
 
 def test_review_interval_counts_shanghai_calendar_days(monkeypatch, tmp_path):

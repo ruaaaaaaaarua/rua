@@ -22,6 +22,7 @@ def public_session(session):
         q.pop('reasoning', None)
         q.pop('confidence', None)
         q.pop('retrieval_audit', None)
+        q.pop('retrieval_audits', None)
         if not q.get('revealed'):
             q.pop('related_history', None)
         a = q.get('analysis') or {}
@@ -31,6 +32,8 @@ def public_session(session):
             q['legacy'] = True
     # Old generated exercises remain in SQLite backups/history but are not active learning content.
     s['messages'] = [m for m in s.get('messages', []) if not m.get('quiz')]
+    for item in s['messages']:
+        item.pop('retrieval_audit', None)
     s['mode'] = 'direct'
     return s
 
@@ -336,10 +339,30 @@ class LearningService:
     def references(s, qid=None):
         return [r for r in s.get('references', []) if not r.get('question_id') or r.get('question_id') == qid][-5:]
 
-    @staticmethod
-    def thread_messages(s, q=None):
-        return [m for m in s['messages'] if m.get('question_id') == (q or {}).get('id')
-                and (not q or m.get('question_revision') == q.get('revision', 1))]
+    def audit_valid(self, audit, valid_message_ids):
+        versions = {node['id']: node['version'] for node in self.library.catalog()['nodes']}
+        if any(versions.get(item.get('id')) != item.get('version') for item in audit.get('core', [])):
+            return False
+        for item in audit.get('history', []):
+            source = self.store.get_session(item.get('session_id'))
+            question = next((q for q in (source or {}).get('questions', [])
+                             if q.get('id') == item.get('question_id')), None)
+            if (not question or question.get('revision', 1) != item.get('revision')
+                    or not self.is_confirmed(question)):
+                return False
+        return all(ident in valid_message_ids for ident in audit.get('context_message_ids', []))
+
+    def thread_messages(self, s, q=None):
+        candidates = [m for m in s['messages'] if m.get('question_id') == (q or {}).get('id')
+                      and (not q or m.get('question_revision') == q.get('revision', 1))]
+        result, valid_ids = [], set()
+        for item in candidates:
+            audit = item.get('retrieval_audit')
+            if audit and not self.audit_valid(audit, valid_ids):
+                continue
+            result.append(item)
+            valid_ids.add(item['id'])
+        return result
 
     async def hint(self, s, qid):
         q=self.question(s, qid)
@@ -377,9 +400,11 @@ class LearningService:
         for item in visible_questions:
             if item.get('legacy'):
                 item.pop('analysis', None)
+        current_thread = self.thread_messages(s, q)[-12:]
         payload = dict(
             questions=[item for item in visible_questions if item['id']==qid] if q else visible_questions,
-            history=self.thread_messages(s, q)[-12:], wiki_context=context, hint_only=hint_only,
+            history=[{k: v for k, v in item.items() if k != 'retrieval_audit'} for item in current_thread],
+            wiki_context=context, hint_only=hint_only,
             learning=[dict(knowledge_id=k, **self.study.learning(k)) for k in related_ids],
             references=self.references(s, qid))
         history = related_history(self.store, self.study, s['id'], q) if q and q.get('revealed') and not hint_only else []
@@ -388,9 +413,14 @@ class LearningService:
             q['related_history'] = [{k: item[k] for k in ('session_id', 'question_id', 'revision', 'title', 'state', 'source_url')}
                                     for item in history]
         if q:
-            q['retrieval_audit'] = {'core': [{k: n[k] for k in ('id', 'version')} for n in context],
-                                    'provider': self.provider_identity('chat'),
-                                    'history': [{k: item[k] for k in ('session_id', 'question_id', 'revision')} for item in history]}
+            chat_audit = {'core': [{k: n[k] for k in ('id', 'version')} for n in context],
+                          'provider': self.provider_identity('chat'),
+                          'history': [{k: item[k] for k in ('session_id', 'question_id', 'revision')} for item in history],
+                          'context_message_ids': [item['id'] for item in current_thread]}
+        else:
+            chat_audit = {'core': [{k: n[k] for k in ('id', 'version')} for n in context],
+                          'provider': self.provider_identity('chat'), 'history': [],
+                          'context_message_ids': [item['id'] for item in current_thread]}
         # Freeze model context before background work can append later questions/results.
         payload = copy.deepcopy(payload)
         affected = list([q] if q else s['questions'])
@@ -429,7 +459,10 @@ class LearningService:
                 expose()
                 if stream:
                     yield {'type': 'delta', 'text': content}
+            if q:
+                q.setdefault('retrieval_audits', []).append(copy.deepcopy(chat_audit))
             s['messages'].append(message('assistant', content, 'hint' if hint else 'text', citations=self.citations(context),
+                                        retrieval_audit=chat_audit,
                                         knowledge_status='available' if context else 'empty', **tags))
             if s['status'] == 'chatting':
                 s.update(status='ready', error=None)
@@ -453,6 +486,7 @@ class LearningService:
         q.pop('classification', None)
         q.pop('related_history', None)
         q.pop('retrieval_audit', None)
+        q.pop('retrieval_audits', None)
         q['revealed'] = False
         # Do not erase prior exposure when an answer or transcript is corrected.
         q.setdefault('help_seen', False)
@@ -475,6 +509,8 @@ class LearningService:
     async def organize(self, scoped=None):
         candidates = []
         for s in self.store.sessions(full=True):
+            if s.get('demo'):
+                continue
             for q in s.get('questions', []):
                 if self.is_confirmed(q) and not q.get('classification') and (not scoped or q['id'] in scoped):
                     candidates.append((s, q, q.get('revision', 1)))
@@ -515,8 +551,8 @@ class LearningService:
                 classified += 1
             except Exception:
                 failed += 1
-        remaining = sum(1 for s in self.store.sessions(full=True) for q in s.get('questions', [])
-                        if self.is_confirmed(q) and not q.get('classification'))
+        remaining = sum(1 for s in self.store.sessions(full=True) if not s.get('demo')
+                        for q in s.get('questions', []) if self.is_confirmed(q) and not q.get('classification'))
         return {'classified': classified, 'remaining': remaining, 'failed': failed}
 
     async def review_hint(self, rid):
