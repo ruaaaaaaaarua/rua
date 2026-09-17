@@ -18,28 +18,35 @@ const json = (method, body) => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+const segment = (value) => encodeURIComponent(value);
 
 export const api = {
   sessions: () => request("/sessions"),
-  session: (id) => request(`/sessions/${id}`),
+  session: (id) => request(`/sessions/${segment(id)}`),
   createSession: (body = {}) => request("/sessions", json("POST", body)),
-  patchSession: (id, body) => request(`/sessions/${id}`, json("PATCH", body)),
+  patchSession: (id, body) =>
+    request(`/sessions/${segment(id)}`, json("PATCH", body)),
   deleteSession: (id, deleteEvidence = false) =>
-    request(`/sessions/${id}?delete_evidence=${deleteEvidence}`, {
+    request(`/sessions/${segment(id)}?delete_evidence=${deleteEvidence}`, {
       method: "DELETE",
     }),
   upload: (id, files) => {
     const body = new FormData();
     [...files].forEach((file) => body.append("files", file));
-    return request(`/sessions/${id}/upload`, { method: "POST", body });
+    return request(`/sessions/${segment(id)}/upload`, { method: "POST", body });
   },
-  extract: (id) => request(`/sessions/${id}/extract`, json("POST", {})),
-  process: (id) => request(`/sessions/${id}/process`, json("POST", {})),
+  extract: (id) =>
+    request(`/sessions/${segment(id)}/extract`, json("POST", {})),
+  process: (id) =>
+    request(`/sessions/${segment(id)}/process`, json("POST", {})),
   extractStream: async (id, onQuestion) => {
-    const response = await fetch(`/api/sessions/${id}/extract-stream`, {
-      method: "POST",
-      headers: { Accept: "text/event-stream" },
-    });
+    const response = await fetch(
+      `/api/sessions/${segment(id)}/extract-stream`,
+      {
+        method: "POST",
+        headers: { Accept: "text/event-stream" },
+      },
+    );
     if (!response.ok) {
       const type = response.headers.get("content-type") || "";
       const body = type.includes("json")
@@ -75,14 +82,14 @@ export const api = {
       receive(value);
     }
     if (!completed) throw new Error("图片识别连接提前结束，请重试");
-    return request(`/sessions/${id}`);
+    return request(`/sessions/${segment(id)}`);
   },
   analyze: async (id, onProgress) => {
     let active = true,
       timer,
       polling;
     const poll = () => {
-      polling = request(`/sessions/${id}`)
+      polling = request(`/sessions/${segment(id)}`)
         .then((s) => {
           if (active) onProgress?.(s);
         })
@@ -93,7 +100,10 @@ export const api = {
     };
     if (onProgress) timer = setTimeout(poll, 600);
     try {
-      return await request(`/sessions/${id}/analyze`, json("POST", {}));
+      return await request(
+        `/sessions/${segment(id)}/analyze`,
+        json("POST", {}),
+      );
     } finally {
       active = false;
       clearTimeout(timer);
@@ -101,14 +111,20 @@ export const api = {
     }
   },
   hint: (id, qid) =>
-    request(`/sessions/${id}/questions/${qid}/hint`, json("POST", {})),
+    request(
+      `/sessions/${segment(id)}/questions/${segment(qid)}/hint`,
+      json("POST", {}),
+    ),
   message: (id, body) =>
-    request(`/sessions/${id}/messages`, json("POST", body)),
+    request(`/sessions/${segment(id)}/messages`, json("POST", body)),
   messageStream: async (id, body, onDelta) => {
-    const response = await fetch(`/api/sessions/${id}/messages-stream`, {
-      ...json("POST", body),
-      headers: { ...json("POST", body).headers, Accept: "text/event-stream" },
-    });
+    const response = await fetch(
+      `/api/sessions/${segment(id)}/messages-stream`,
+      {
+        ...json("POST", body),
+        headers: { ...json("POST", body).headers, Accept: "text/event-stream" },
+      },
+    );
     if (!response.ok) {
       const type = response.headers.get("content-type") || "";
       const value = type.includes("json")
@@ -162,21 +178,35 @@ export const api = {
     }
   },
   patchQuestion: (id, qid, body) =>
-    request(`/sessions/${id}/questions/${qid}`, json("PATCH", body)),
+    request(
+      `/sessions/${segment(id)}/questions/${segment(qid)}`,
+      json("PATCH", body),
+    ),
   reveal: (id, qid) =>
-    request(`/sessions/${id}/questions/${qid}/reveal`, json("POST", {})),
+    request(
+      `/sessions/${segment(id)}/questions/${segment(qid)}/reveal`,
+      json("POST", {}),
+    ),
   retryQuestion: (id, qid, body) =>
-    request(`/sessions/${id}/questions/${qid}/retry`, json("POST", body)),
+    request(
+      `/sessions/${segment(id)}/questions/${segment(qid)}/retry`,
+      json("POST", body),
+    ),
   deleteAttachment: (id, aid) =>
-    request(`/sessions/${id}/attachments/${aid}`, { method: "DELETE" }),
+    request(`/sessions/${segment(id)}/attachments/${segment(aid)}`, {
+      method: "DELETE",
+    }),
   recheck: (id, qid, text) =>
-    request(`/sessions/${id}/questions/${qid}/recheck`, json("POST", { text })),
+    request(
+      `/sessions/${segment(id)}/questions/${segment(qid)}/recheck`,
+      json("POST", { text }),
+    ),
   reference: (id, text) =>
-    request(`/sessions/${id}/reference`, json("POST", { text })),
+    request(`/sessions/${segment(id)}/reference`, json("POST", { text })),
   referenceUpload: (id, files) => {
     const body = new FormData();
     [...files].forEach((file) => body.append("files", file));
-    return request(`/sessions/${id}/reference-upload`, {
+    return request(`/sessions/${segment(id)}/reference-upload`, {
       method: "POST",
       body,
     });
@@ -190,7 +220,7 @@ export const api = {
   wikiNode: (id) => request(`/wiki/${encodeURIComponent(id)}`),
   linkQuestion: (id, qid, knowledge_ids) =>
     request(
-      `/sessions/${id}/questions/${qid}/links`,
+      `/sessions/${segment(id)}/questions/${segment(qid)}/links`,
       json("PUT", { knowledge_ids }),
     ),
   reviews: (limit = 5) => request(`/reviews?limit=${limit}`),
@@ -202,14 +232,15 @@ export const api = {
     ),
   classifyQuestion: (id, qid, body) =>
     request(
-      `/sessions/${id}/questions/${qid}/classification`,
+      `/sessions/${segment(id)}/questions/${segment(qid)}/classification`,
       json("PATCH", body),
     ),
   startReview: (body) => request("/reviews/start", json("POST", body)),
-  revealReview: (id) => request(`/reviews/${id}/reveal`, json("POST", {})),
-  hintReview: (id) => request(`/reviews/${id}/hint`, json("POST", {})),
+  revealReview: (id) =>
+    request(`/reviews/${segment(id)}/reveal`, json("POST", {})),
+  hintReview: (id) => request(`/reviews/${segment(id)}/hint`, json("POST", {})),
   answerReview: (id, answer) =>
-    request(`/reviews/${id}/answer`, json("POST", { answer })),
+    request(`/reviews/${segment(id)}/answer`, json("POST", { answer })),
   archive: () => request("/archive"),
   saveArchive: (body) => request("/archive", json("PUT", body)),
 };

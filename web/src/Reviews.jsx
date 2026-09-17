@@ -15,6 +15,11 @@ import { AnswerChoices } from "./Study.jsx";
 import { Empty, Markdown, dateText } from "./ui.jsx";
 
 export { buildClassification };
+const difficultyLabel = (value) =>
+  ({ basic: "基础", intermediate: "进阶", advanced: "挑战" })[value] ||
+  value ||
+  "难度待定";
+const sentence = (value) => String(value || "").replace(/[。.!！]+$/u, "");
 
 function ReviewRunner({
   review,
@@ -159,6 +164,19 @@ export default function Reviews({
       />
     );
   const items = visibleReviews(data?.items, filter === "all" ? "all" : filter);
+  const recommendedKeys = new Set(
+    (data?.recommended || []).map(
+      (item) => `${item.session_id}:${item.question_id}`,
+    ),
+  );
+  const displayedGroups =
+    filter === "groups"
+      ? (data?.groups || []).filter((group) =>
+          recommendedKeys.has(
+            `${group.representative?.session_id}:${group.representative?.question_id}`,
+          ),
+        )
+      : data?.groups || [];
   return (
     <div className="page review-page">
       <div className="page-title">
@@ -232,6 +250,12 @@ export default function Reviews({
           知识·方法组
         </button>
         <button
+          className={filter === "all-groups" ? "active" : ""}
+          onClick={() => setFilter("all-groups")}
+        >
+          全部分组
+        </button>
+        <button
           className={filter === "due" ? "active" : ""}
           onClick={() => setFilter("due")}
         >
@@ -250,9 +274,9 @@ export default function Reviews({
           全部原题
         </button>
       </div>
-      {filter === "groups" ? (
+      {filter === "groups" || filter === "all-groups" ? (
         <div className="review-groups">
-          {(data?.groups || []).map((group) => (
+          {displayedGroups.map((group) => (
             <article className="paper review-group" key={group.id}>
               <header>
                 <div>
@@ -268,9 +292,11 @@ export default function Reviews({
               </header>
               <p className="muted">
                 选为代表题：
-                {group.reason ||
-                  group.representative?.reason ||
-                  "按到期时间与学习记录保守选择"}
+                {sentence(
+                  group.reason ||
+                    group.representative?.reason ||
+                    "按到期时间与学习记录保守选择",
+                )}
                 。难度与推荐原因是估计，不是能力认证。
               </p>
               {group.representative && (
@@ -284,9 +310,11 @@ export default function Reviews({
               )}
             </article>
           ))}
-          {!(data?.groups || []).length && (
+          {!displayedGroups.length && (
             <Empty icon={RotateCcw} title="还没有可分组的题目">
-              未分类题仍保留在“全部原题”，也可手动纠正分类。
+              {filter === "groups"
+                ? "今日没有推荐代表题，可查看全部分组或原题。"
+                : "未分类题仍保留在“全部原题”，也可手动纠正分类。"}
             </Empty>
           )}
         </div>
@@ -322,7 +350,7 @@ function ReviewItem({ item, index = 0, label, start, busy, onOpenQuestion }) {
         <div className="actions">
           <span className="pill neutral">{item.state}</span>
           <span className="pill neutral">
-            {item.difficulty_label || item.difficulty || "难度待定"}
+            {item.difficulty_label || difficultyLabel(item.difficulty)}
           </span>
           <span className="muted small">{dateText(item.due_at)}</span>
         </div>

@@ -4,6 +4,24 @@ export function changeArchiveProfile(profile, patch) {
   return { profile: { ...profile, ...patch }, feedback: "" };
 }
 
+export function rejectedArchiveProfile(profile) {
+  return { ...profile, selected_medals: [] };
+}
+
+export async function recoverRejectedArchive(profile, fetchArchive) {
+  const safeProfile = rejectedArchiveProfile(profile);
+  try {
+    const data = await fetchArchive();
+    return { profile: normalizeArchive(data).profile, data, error: "" };
+  } catch {
+    return {
+      profile: safeProfile,
+      data: null,
+      error: "勋章资格暂时无法刷新；已清空未核对的选择，请稍后重试。",
+    };
+  }
+}
+
 export function normalizeArchive(data = {}) {
   const profile = data.profile || {};
   const medals = Array.isArray(data.medals) ? data.medals : [];
@@ -12,7 +30,11 @@ export function normalizeArchive(data = {}) {
   );
   return {
     profile: {
-      nickname: String(profile.nickname || "学习者").slice(0, 30),
+      nickname: String(
+        Object.prototype.hasOwnProperty.call(profile, "nickname")
+          ? profile.nickname
+          : "学习者",
+      ).slice(0, 30),
       signature: String(profile.signature || "").slice(0, 100),
       theme: ARCHIVE_THEMES.includes(profile.theme) ? profile.theme : "paper",
       selected_medals: [...new Set(profile.selected_medals || [])]
@@ -42,6 +64,11 @@ const escapeXml = (value) =>
       })[char],
   );
 const glyphWidth = (char) => (/^[\x00-\xff]$/.test(char) ? 0.56 : 1);
+export const estimatedTextWidth = (value, fontSize) =>
+  [...String(value || "")].reduce(
+    (sum, char) => sum + glyphWidth(char) * fontSize,
+    0,
+  );
 export function wrapText(value, maxWidth, maxLines = 1) {
   const chars = [...String(value || "")];
   const lines = [];
@@ -108,7 +135,7 @@ export function archiveSvg(input) {
   const statsRow = profile.show_stats
     ? `<g transform="translate(60 465)" fill="${palette.ink}" font-size="15"><text x="0">已核对题目 ${stats.questions}</text><text x="190">已连接节点 ${stats.linked_nodes}</text><text x="380">复习日 ${stats.review_days}</text></g>`
     : "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="520" viewBox="0 0 640 520" role="img" aria-label="个人学习档案分享卡"><rect width="640" height="520" rx="28" fill="${palette.bg}"/><path d="M42 78h556M42 444h556" stroke="${palette.line}" opacity=".7"/><text x="60" y="62" fill="${palette.line}" font-size="12" letter-spacing="3">PERSONAL LEARNING ARCHIVE</text><text fill="${palette.ink}" font-size="38" font-family="Songti SC,STSong,serif">${textLines(profile.nickname, 60, 145, 42, 14, 1)}</text><text fill="${palette.ink}" opacity=".78" font-size="17" font-family="PingFang SC,Microsoft YaHei,sans-serif">${textLines(profile.signature || "把每次思考，留在自己的档案里。", 60, 190, 24, 48, 2)}</text><text x="60" y="260" fill="${palette.line}" font-size="12" letter-spacing="2">COLLECTED MEDALS</text>${medalRows}${statsRow}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="520" viewBox="0 0 640 520" role="img" aria-label="个人学习档案分享卡"><rect width="640" height="520" rx="28" fill="${palette.bg}"/><path d="M42 78h556M42 444h556" stroke="${palette.line}" opacity=".7"/><text x="60" y="62" fill="${palette.line}" font-size="12" letter-spacing="3">PERSONAL LEARNING ARCHIVE</text><text fill="${palette.ink}" font-size="38" font-family="Songti SC,STSong,serif">${textLines(profile.nickname, 60, 145, 42, 13, 1)}</text><text fill="${palette.ink}" opacity=".78" font-size="17" font-family="PingFang SC,Microsoft YaHei,sans-serif">${textLines(profile.signature, 60, 190, 24, 29, 2)}</text><text x="60" y="260" fill="${palette.line}" font-size="12" letter-spacing="2">COLLECTED MEDALS</text>${medalRows}${statsRow}</svg>`;
 }
 
 export function downloadArchiveSvg(data, documentRef = document, urlApi = URL) {

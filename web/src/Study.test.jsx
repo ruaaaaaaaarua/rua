@@ -5,6 +5,7 @@ import Study, {
   appendMissingOption,
   buildQuestionPatch,
 } from "./Study.jsx";
+import { Sources } from "./ui.jsx";
 
 const q = {
   id: "q1",
@@ -44,6 +45,20 @@ const props = {
 };
 
 describe("photo-first study", () => {
+  it("keeps unlinked citations as plain references while linked citations navigate", () => {
+    const html = renderToStaticMarkup(
+      <Sources
+        citations={[
+          { id: "linked", name: "已连接", version: 1 },
+          { id: "private", name: "未连接", version: 2 },
+        ]}
+        linkedKnowledgeIds={new Set(["linked"])}
+        onKnowledge={noop}
+      />,
+    );
+    expect(html).toMatch(/<button[^>]*>[\s\S]*已连接/);
+    expect(html).toMatch(/<span[^>]*class="source-chip[^>]*>[\s\S]*未连接/);
+  });
   it("requires explicit completeness confirmation and adds bounded missing options", () => {
     const incomplete = { ...q, incomplete: true };
     expect(buildQuestionPatch(incomplete, false)).not.toHaveProperty(

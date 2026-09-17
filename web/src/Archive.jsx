@@ -7,6 +7,8 @@ import {
   downloadArchiveSvg,
   medalArtwork,
   normalizeArchive,
+  rejectedArchiveProfile,
+  recoverRejectedArchive,
 } from "./archive.js";
 import "./archive.css";
 
@@ -14,6 +16,7 @@ export default function Archive({ data, busy, run, refresh }) {
   const normalized = normalizeArchive(data);
   const [profile, setProfile] = useState(normalized.profile);
   const [feedback, setFeedback] = useState("");
+  const [eligibilityError, setEligibilityError] = useState("");
   useEffect(() => setProfile(normalizeArchive(data).profile), [data]);
   const preview = useMemo(
     () => archiveSvg({ ...normalized, profile }),
@@ -47,13 +50,12 @@ export default function Archive({ data, busy, run, refresh }) {
       },
     );
     if (!result) {
-      api
-        .archive()
-        .then((actual) => {
-          setProfile(normalizeArchive(actual).profile);
-          refresh?.(actual);
-        })
-        .catch(() => {});
+      setProfile((current) => rejectedArchiveProfile(current));
+      setEligibilityError("正在重新核对勋章资格…");
+      const recovered = await recoverRejectedArchive(profile, api.archive);
+      setProfile(recovered.profile);
+      setEligibilityError(recovered.error);
+      if (recovered.data) refresh?.(recovered.data);
     }
   };
   return (
@@ -120,7 +122,7 @@ export default function Archive({ data, busy, run, refresh }) {
               className={`archive-medal ${medal.earned ? "earned" : "locked"} ${profile.selected_medals.includes(medal.id) ? "selected" : ""}`}
               onClick={() => toggleMedal(medal)}
               aria-pressed={profile.selected_medals.includes(medal.id)}
-              disabled={!medal.earned}
+              disabled={!medal.earned || !!eligibilityError}
             >
               <span
                 className="medal-art"
@@ -128,15 +130,21 @@ export default function Archive({ data, busy, run, refresh }) {
               />
               {!medal.earned && <Lock size={15} className="medal-lock" />}
               <strong>{medal.title}</strong>
+              <span className="medal-condition-label">获得条件</span>
               <small>{medal.description}</small>
               <em>
                 {medal.earned
                   ? `获得于 ${medal.earned_at || "已记录"}`
                   : "尚未获得"}
               </em>
-              {medal.earned && medal.evidence?.[0]?.date && (
-                <span>证据日期 {medal.evidence[0].date}</span>
-              )}
+              {medal.earned &&
+                (medal.evidence || []).map((evidence, index) => (
+                  <span
+                    key={`${evidence.session_id}-${evidence.question_id}-${evidence.revision}-${index}`}
+                  >
+                    证据 {evidence.date || medal.earned_at || "已记录"}
+                  </span>
+                ))}
             </button>
           ))}
         </div>
@@ -159,6 +167,11 @@ export default function Archive({ data, busy, run, refresh }) {
         <p className="archive-privacy">
           预览只包含昵称、签名、已选且已获得的勋章；学习数据需主动勾选。不包含原题、图片或正确率。
         </p>
+        {eligibilityError && (
+          <p className="notice error" role="alert">
+            {eligibilityError}
+          </p>
+        )}
         <div
           className="share-preview"
           dangerouslySetInnerHTML={{ __html: preview }}

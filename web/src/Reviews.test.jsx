@@ -56,6 +56,32 @@ describe("personal reviews", () => {
     expect(html).not.toContain("本组已通过");
   });
 
+  it("renders only the bounded recommended representatives in the initial view", () => {
+    const groups = Array.from({ length: 6 }, (_, index) => ({
+      ...data.groups[0],
+      id: `g${index}`,
+      representative: {
+        ...item,
+        question_id: `q${index}`,
+        text: `代表题${index}`,
+      },
+    }));
+    const recommended = groups.slice(0, 3).map((group) => group.representative);
+    const html = renderToStaticMarkup(
+      <Reviews
+        data={{ ...data, groups, recommended, limit: 3 }}
+        run={noop}
+        busy={false}
+        refresh={noop}
+        onOpenQuestion={noop}
+        onBudget={noop}
+      />,
+    );
+    expect(html).toContain("代表题0");
+    expect(html).toContain("代表题2");
+    expect(html).not.toContain("代表题3");
+  });
+
   it("validates complete controlled correction payloads", () => {
     expect(() =>
       buildClassification(

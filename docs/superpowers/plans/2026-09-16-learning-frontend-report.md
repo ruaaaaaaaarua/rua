@@ -68,7 +68,7 @@ Full frontend regression:
 ```text
 npm --prefix web test
 Test Files 6 passed (6)
-Tests 38 passed (38)
+Tests 43 passed (43)
 ```
 
 Production build:
@@ -103,3 +103,19 @@ Build warning: Vite reports the existing single JavaScript chunk is larger than 
 
 - Browser visual/interaction QA is intentionally left to the controller's isolated fixture, per task assignment.
 - The successful build retains the pre-existing large-chunk warning described above.
+
+## Post-review correction wave
+
+Controller review found five contract/visual issues. New failing tests reproduced them before fixes: the initial review view rendered all groups instead of the bounded `recommended` list; unlinked citations were clickable; explicit blank archive text gained stock copy; failed save plus failed eligibility reload could retain unsafe client selection without a local error; and SID/QID URL segments were not encoded. A browser check also showed the SVG signature width budget was based on characters rather than rendered pixels.
+
+Focused RED before this correction wave: 5 failures across `Reviews.test.jsx`, `Study.test.jsx`, `Archive.test.jsx`, and `api.test.js`. The additional save-failure-plus-refresh-failure test then failed because `recoverRejectedArchive` did not exist. After implementation, the full suite is 43/43 passing.
+
+Corrections now:
+
+- Render only server-bounded recommendations in the initial “知识·方法组” view, with a separate “全部分组” tab and the existing “全部原题” tab.
+- Render citations as links only when their IDs are in the mounted personal Wiki set; otherwise retain plain reference text.
+- Preserve explicit blank nickname/signature, remove stock signature export copy, and use a 520px-safe weighted CJK/Latin budget (13 units at 38px for nickname; 29 units at 17px for signature).
+- Clear rejected medal selections immediately; if the corrective archive GET also fails, keep the safe selection, disable medal choice, and show an inline eligibility-refresh error.
+- Label medal descriptions as earning conditions and list available evidence records consistently.
+- Encode dynamic session/question/review URL path segments.
+- Translate raw review difficulty codes and normalize trailing punctuation in recommendation reasons.

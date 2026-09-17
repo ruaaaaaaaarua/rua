@@ -96,6 +96,7 @@ export function Sources({
   knowledgeStatus,
   source,
   onKnowledge,
+  linkedKnowledgeIds,
 }) {
   return (
     <div className="sources">
@@ -103,18 +104,33 @@ export function Sources({
         <details>
           <summary>查看参考记录（{citations.length}）</summary>
           <div className="actions">
-            {citations.map((c) => (
-              <button
-                key={`${c.id}-${c.version}`}
-                className="source-chip"
-                onClick={() => onKnowledge?.(c.id)}
-              >
-                <BookOpen size={12} />
-                {c.name}
-                <span>v{c.version}</span>
-                <ArrowUpRight size={12} />
-              </button>
-            ))}
+            {citations.map((c) => {
+              const linked = linkedKnowledgeIds?.has(c.id);
+              const content = (
+                <>
+                  <BookOpen size={12} />
+                  {c.name}
+                  <span>v{c.version}</span>
+                  {linked && <ArrowUpRight size={12} />}
+                </>
+              );
+              return linked ? (
+                <button
+                  key={`${c.id}-${c.version}`}
+                  className="source-chip"
+                  onClick={() => onKnowledge?.(c.id)}
+                >
+                  {content}
+                </button>
+              ) : (
+                <span
+                  key={`${c.id}-${c.version}`}
+                  className="source-chip plain-reference"
+                >
+                  {content}
+                </span>
+              );
+            })}
           </div>
         </details>
       ) : knowledgeStatus === "empty" ? (

@@ -5,7 +5,11 @@ import Archive from "./Archive.jsx";
 import {
   archiveSvg,
   changeArchiveProfile,
+  estimatedTextWidth,
   normalizeArchive,
+  rejectedArchiveProfile,
+  recoverRejectedArchive,
+  wrapText,
 } from "./archive.js";
 
 const data = {
@@ -72,6 +76,17 @@ describe("archive share output", () => {
     ).toBe("paper");
   });
 
+  it("preserves explicit blank profile text without inserting stock share copy", () => {
+    const normalized = normalizeArchive({
+      ...data,
+      profile: { ...data.profile, nickname: "", signature: "" },
+    });
+    expect(normalized.profile.nickname).toBe("");
+    const svg = archiveSvg({ ...data, profile: normalized.profile });
+    expect(svg).not.toContain("学习者");
+    expect(svg).not.toContain("把每次思考");
+  });
+
   it("wraps long mixed-width text within the card and truncates with an ellipsis", () => {
     const svg = archiveSvg({
       ...data,
@@ -85,6 +100,13 @@ describe("archive share output", () => {
     expect(svg).toContain("<tspan");
     expect(svg).toContain("…");
     expect(svg).not.toContain("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234");
+    const signature =
+      "把每次思考留在自己的档案里。这是一段长中文与 mixed Latin text 相结合的测试签名，用来检查分享卡排版。";
+    expect(
+      wrapText(signature, 29, 2).every(
+        (line) => estimatedTextWidth(line, 17) <= 520,
+      ),
+    ).toBe(true);
   });
 
   it("renders scoped themes and no raw question data", () => {
@@ -110,5 +132,21 @@ describe("archive share output", () => {
         "已保存到本机档案",
       ),
     ).toEqual({ profile: { ...data.profile, theme: "paper" }, feedback: "" });
+  });
+
+  it("removes rejected medal selections while eligibility cannot be refreshed", () => {
+    expect(rejectedArchiveProfile(data.profile)).toEqual({
+      ...data.profile,
+      selected_medals: [],
+    });
+  });
+
+  it("keeps a safe profile and surfaces an error when save and eligibility refresh both fail", async () => {
+    const recovered = await recoverRejectedArchive(data.profile, async () => {
+      throw new Error("offline");
+    });
+    expect(recovered.profile.selected_medals).toEqual([]);
+    expect(recovered.data).toBeNull();
+    expect(recovered.error).toContain("无法刷新");
   });
 });

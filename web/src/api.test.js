@@ -159,7 +159,7 @@ it("uses bounded review, classification, organize and archive contracts", async 
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([
     "/api/reviews?limit=10",
     "/api/reviews/organize",
-    "/api/sessions/s 1/questions/q/1/classification",
+    "/api/sessions/s%201/questions/q%2F1/classification",
     "/api/archive",
     "/api/archive",
   ]);

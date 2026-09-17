@@ -882,6 +882,7 @@ function QuestionCard({
             knowledgeStatus={q.analysis.knowledge_status}
             source={q.analysis.source}
             onKnowledge={onKnowledge}
+            linkedKnowledgeIds={new Set((wiki?.nodes || []).map((n) => n.id))}
           />
           {q.related_history?.length > 0 && (
             <div className="related-history">
@@ -965,6 +966,7 @@ export function Conversation({
   onSend,
   onKnowledge,
   onClear,
+  linkedKnowledgeIds,
 }) {
   const [text, setText] = useState(""),
     tail = useRef();
@@ -1038,6 +1040,7 @@ export function Conversation({
                 citations={m.citations}
                 knowledgeStatus={m.knowledge_status}
                 onKnowledge={onKnowledge}
+                linkedKnowledgeIds={linkedKnowledgeIds}
               />
             )}
           </article>
@@ -1239,6 +1242,7 @@ export default function Study({
         busy={busy}
         onSend={onSend}
         onKnowledge={onKnowledge}
+        linkedKnowledgeIds={new Set((wiki?.nodes || []).map((n) => n.id))}
         onClear={() => {
           setSelectedId(null);
           onClearKnowledge();
