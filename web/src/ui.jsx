@@ -100,27 +100,28 @@ export function Sources({
   return (
     <div className="sources">
       {citations.length > 0 ? (
-        citations.map((c) => (
-          <button
-            key={`${c.id}-${c.version}`}
-            className="source-chip"
-            onClick={() => onKnowledge?.(c.id)}
-          >
-            <BookOpen size={12} />
-            {c.name}
-            <span>v{c.version}</span>
-            <ArrowUpRight size={12} />
-          </button>
-        ))
-      ) : (
-        <span className="pill neutral">
-          {knowledgeStatus === "empty"
-            ? "知识正文待填充 · 模型补充"
-            : source === "wiki"
-              ? "知识库参考"
-              : "模型补充"}
+        <details>
+          <summary>查看参考记录（{citations.length}）</summary>
+          <div className="actions">
+            {citations.map((c) => (
+              <button
+                key={`${c.id}-${c.version}`}
+                className="source-chip"
+                onClick={() => onKnowledge?.(c.id)}
+              >
+                <BookOpen size={12} />
+                {c.name}
+                <span>v{c.version}</span>
+                <ArrowUpRight size={12} />
+              </button>
+            ))}
+          </div>
+        </details>
+      ) : knowledgeStatus === "empty" ? (
+        <span className="notice">
+          相关知识正文待填充，请对关键结论保持核对。
         </span>
-      )}
+      ) : null}
     </div>
   );
 }

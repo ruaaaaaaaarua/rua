@@ -138,8 +138,12 @@ describe("photo-first study", () => {
     );
     expect(html).toContain("后台处理中");
     expect(html).toMatch(/<button[^>]*>我再试一次<\/button>/);
-    expect(html).toMatch(/<button[^>]*>[^<]*<svg[^>]*>[\s\S]*?查看解析<\/button>/);
-    expect(html).toMatch(/<button[^>]*>[^<]*<svg[^>]*>[\s\S]*?给我一点提示<\/button>/);
+    expect(html).toMatch(
+      /<button[^>]*>[^<]*<svg[^>]*>[\s\S]*?查看解析<\/button>/,
+    );
+    expect(html).toMatch(
+      /<button[^>]*>[^<]*<svg[^>]*>[\s\S]*?给我一点提示<\/button>/,
+    );
   });
   it("disables pending question actions and structural edits while processing", () => {
     const pending = { ...q, id: "q2", number: 2, analysis: null };
@@ -152,6 +156,40 @@ describe("photo-first study", () => {
     );
     expect(html).toMatch(/aria-label="编辑识别内容"[^>]*disabled/);
     expect(html).toMatch(/>追问这道题<\/button>/);
-    expect(html).toMatch(/disabled=""[^>]*>[^<]*<svg[^>]*>[\s\S]*?给我一点提示<\/button>/);
+    expect(html).toMatch(
+      /disabled=""[^>]*>[^<]*<svg[^>]*>[\s\S]*?给我一点提示<\/button>/,
+    );
+  });
+  it("hides ordinary source badges but retains pending warnings", () => {
+    const html = renderToStaticMarkup(<Study {...props} />);
+    expect(html).not.toContain("模型补充");
+    const pending = renderToStaticMarkup(
+      <Study
+        {...props}
+        session={{
+          ...s,
+          questions: [{ ...q, analysis: { ...q.analysis, status: "pending" } }],
+        }}
+      />,
+    );
+    expect(pending).toContain("答案待确认");
+  });
+  it("shows related personal history only after the answer is revealed", () => {
+    const historic = {
+      ...q,
+      related_history: [
+        {
+          session_id: "old",
+          question_id: "oq",
+          title: "上次学习",
+          state: "曾答错",
+          source_url: "/sessions/old?question=oq",
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <Study {...props} session={{ ...s, questions: [historic] }} />,
+    );
+    expect(html).not.toContain("上次学习");
   });
 });

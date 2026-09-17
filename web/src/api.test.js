@@ -140,3 +140,29 @@ it("cancels and releases the SSE reader after an error event", async () => {
   expect(reader.cancel).toHaveBeenCalledOnce();
   expect(reader.releaseLock).toHaveBeenCalledOnce();
 });
+
+it("uses bounded review, classification, organize and archive contracts", async () => {
+  const response = (body = {}) => ({
+    ok: true,
+    headers: { get: () => "application/json" },
+    json: async () => body,
+  });
+  const fetch = vi.fn(async () => response({}));
+  vi.stubGlobal("fetch", fetch);
+
+  await api.reviews(10);
+  await api.organizeReviews();
+  await api.classifyQuestion("s 1", "q/1", { method: "concept" });
+  await api.archive();
+  await api.saveArchive({ theme: "paper" });
+
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    "/api/reviews?limit=10",
+    "/api/reviews/organize",
+    "/api/sessions/s 1/questions/q/1/classification",
+    "/api/archive",
+    "/api/archive",
+  ]);
+  expect(fetch.mock.calls[1][1]).toMatchObject({ method: "POST" });
+  expect(fetch.mock.calls[4][1]).toMatchObject({ method: "PUT" });
+});

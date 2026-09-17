@@ -1127,6 +1127,78 @@ h3 {
   line-height: 1.8;
   margin-top: 7px;
 }
+.review-organize {
+  align-items: flex-start;
+}
+.review-organize > div {
+  flex: 1;
+}
+.organize-result {
+  color: var(--green) !important;
+  font-weight: 600;
+  margin-top: 8px !important;
+}
+.review-budget {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 20px;
+  margin: 18px 0;
+}
+.review-budget label {
+  max-width: 170px;
+}
+.review-groups {
+  display: grid;
+  gap: 18px;
+}
+.review-group {
+  padding: 24px;
+}
+.review-group > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.review-group > p {
+  line-height: 1.7;
+  margin-bottom: 16px;
+}
+.review-group .review-item {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  border-left: 0;
+  border-right: 0;
+  border-radius: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+.review-hint {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-top: 14px;
+  border-left: 3px solid #c6a35f;
+  background: #faf6e9;
+  line-height: 1.6;
+}
+.related-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.related-history .linked-question {
+  justify-content: space-between;
+}
+.related-history .linked-question span {
+  display: grid;
+  text-align: left;
+  gap: 4px;
+}
 .review-item {
   display: flex;
   gap: 20px;

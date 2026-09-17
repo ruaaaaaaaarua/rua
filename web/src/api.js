@@ -115,7 +115,10 @@ export const api = {
         ? await response.json()
         : await response.text();
       throw new Error(
-        value?.detail || value?.message || value || `请求失败 (${response.status})`,
+        value?.detail ||
+          value?.message ||
+          value ||
+          `请求失败 (${response.status})`,
       );
     }
     if (!response.body) throw new Error("浏览器不支持流式响应，请重试");
@@ -190,9 +193,23 @@ export const api = {
       `/sessions/${id}/questions/${qid}/links`,
       json("PUT", { knowledge_ids }),
     ),
-  reviews: () => request("/reviews"),
+  reviews: (limit = 5) => request(`/reviews?limit=${limit}`),
+  reviewTaxonomy: () => request("/review-taxonomy"),
+  organizeReviews: (question_ids) =>
+    request(
+      "/reviews/organize",
+      json("POST", question_ids?.length ? { question_ids } : {}),
+    ),
+  classifyQuestion: (id, qid, body) =>
+    request(
+      `/sessions/${id}/questions/${qid}/classification`,
+      json("PATCH", body),
+    ),
   startReview: (body) => request("/reviews/start", json("POST", body)),
   revealReview: (id) => request(`/reviews/${id}/reveal`, json("POST", {})),
+  hintReview: (id) => request(`/reviews/${id}/hint`, json("POST", {})),
   answerReview: (id, answer) =>
     request(`/reviews/${id}/answer`, json("POST", { answer })),
+  archive: () => request("/archive"),
+  saveArchive: (body) => request("/archive", json("PUT", body)),
 };

@@ -59,7 +59,8 @@ export default function Knowledge({
           <>
             <div className="detail-heading">
               <span className="eyebrow">
-                {wiki.chapters.find((c) => c.id === detail.chapter_id)?.name}
+                {wiki?.chapters?.find((c) => c.id === detail.chapter_id)
+                  ?.name || "已连接知识点"}
               </span>
               <h1>{detail.name}</h1>
               <div className="actions">
@@ -94,7 +95,7 @@ export default function Knowledge({
                     <span>
                       {detail.has_content
                         ? "内容与版本由知识库维护者管理"
-                        : "当前仍可关联题目，或使用模型补充讲解"}
+                        : "当前可作为题目与学习记录的容器"}
                     </span>
                     <button className="text-link" onClick={() => onAsk(detail)}>
                       聊聊这个知识点 <ArrowRight size={14} />
@@ -115,10 +116,10 @@ export default function Knowledge({
                   <div className="section-top">
                     <h2>我的关联题目</h2>
                     <span className="muted small">
-                      {detail.questions.length} 道
+                      {(detail.questions || []).length} 道
                     </span>
                   </div>
-                  {detail.questions.length ? (
+                  {(detail.questions || []).length ? (
                     detail.questions.map((q) => (
                       <button
                         className="linked-question"
@@ -142,8 +143,11 @@ export default function Knowledge({
               <aside className="wiki-aside">
                 <section className="paper">
                   <span className="eyebrow">我的学习记录</span>
-                  <h3>{detail.learning.state}</h3>
-                  <p>{detail.learning.summary}</p>
+                  <h3>{detail.learning?.state || "尚无学习记录"}</h3>
+                  <p>
+                    {detail.learning?.summary ||
+                      "关联题目后，这里会显示可核对的学习记录。"}
+                  </p>
                   <small>
                     记录关联题目的表现，不据此推断每个知识点都已掌握。
                   </small>
@@ -219,7 +223,7 @@ export default function Knowledge({
         >
           全部章节
         </button>
-        {wiki?.chapters.map((c) => (
+        {(wiki?.chapters || []).map((c) => (
           <button
             key={c.id}
             className={chapter === c.id ? "active" : ""}
@@ -273,11 +277,15 @@ export default function Knowledge({
           </section>
         ))}
       {!nodes.length && (
-        <Empty title="还没找到这个知识点">换个关键词，或清除章节筛选。</Empty>
+        <Empty title={query ? "还没找到这个知识点" : "你的知识地图还是空的"}>
+          {query
+            ? "换个关键词，或清除章节筛选。"
+            : "上传题目照片并完成分析后，与题目相连的知识点会出现在这里。"}
+        </Empty>
       )}
       <div className="catalog-note">
         <span className="status-dot" />
-        目录是可维护的学科骨架。正文、来源和知识关系由维护者逐步完善。
+        这里只展示与你的题目已建立连接的知识点。
       </div>
     </div>
   );

@@ -138,6 +138,37 @@ export function visibleReviews(items = [], filter = "due") {
   );
 }
 
+export function buildClassification(draft, allowed) {
+  const ids = [...new Set(draft.knowledge_ids || [])];
+  const valid =
+    ids.length &&
+    ids.every((id) => allowed.knowledgeIds.has(id)) &&
+    ids.includes(draft.primary_knowledge_id) &&
+    allowed.methods.has(draft.method) &&
+    allowed.variants.has(draft.variant) &&
+    allowed.difficulties.has(draft.difficulty) &&
+    draft.target?.trim() &&
+    draft.methodCondition?.trim() &&
+    draft.boundary?.trim() &&
+    draft.reason?.trim();
+  if (!valid)
+    throw new Error("分类需使用可用知识点并完整填写目标、方法和边界条件");
+  return {
+    knowledge_ids: ids,
+    primary_knowledge_id: draft.primary_knowledge_id,
+    method: draft.method,
+    variant: draft.variant,
+    conditions: [
+      `target:${draft.target.trim()}`,
+      `method:${draft.methodCondition.trim()}`,
+      `boundary:${draft.boundary.trim()}`,
+    ],
+    difficulty: draft.difficulty,
+    confidence: 1,
+    reason: draft.reason.trim(),
+  };
+}
+
 export function knowledgeState(state) {
   return (
     KNOWLEDGE_STATES[state] || { key: "unknown", label: state || "尚无记录" }

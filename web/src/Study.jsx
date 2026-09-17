@@ -16,7 +16,12 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api.js";
-import { answerText, analysisStage, toggleAnswer } from "./domain.js";
+import {
+  answerText,
+  analysisStage,
+  buildClassification,
+  toggleAnswer,
+} from "./domain.js";
 import { Empty, Loading, Markdown, Modal, Sources, dateText } from "./ui.jsx";
 
 export const IMAGE_TYPES =
@@ -160,27 +165,35 @@ export function Dashboard({
           </button>
         </div>
         <div className="chapter-previews">
-          {wiki?.chapters?.slice(0, 4).map((c, i) => (
-            <button
-              className="chapter-preview"
-              key={c.id}
-              onClick={() => onChapter(c.id)}
-            >
-              <span className="chapter-number">0{i + 1}</span>
-              <BookOpen size={18} strokeWidth={1.4} />
-              <h3>{c.name}</h3>
-              <span className="muted small">
-                {wiki.nodes.filter((n) => n.chapter_id === c.id).length}{" "}
-                个知识节点
-              </span>
-              <ArrowRight size={15} />
-            </button>
-          ))}
+          {wiki?.chapters
+            ?.filter((c) =>
+              (wiki.nodes || []).some((n) => n.chapter_id === c.id),
+            )
+            .slice(0, 4)
+            .map((c, i) => (
+              <button
+                className="chapter-preview"
+                key={c.id}
+                onClick={() => onChapter(c.id)}
+              >
+                <span className="chapter-number">0{i + 1}</span>
+                <BookOpen size={18} strokeWidth={1.4} />
+                <h3>{c.name}</h3>
+                <span className="muted small">
+                  {
+                    (wiki.nodes || []).filter((n) => n.chapter_id === c.id)
+                      .length
+                  }{" "}
+                  个知识节点
+                </span>
+                <ArrowRight size={15} />
+              </button>
+            ))}
         </div>
-        {wiki && !wiki.published_count && (
+        {wiki && !wiki.nodes?.length && (
           <p className="catalog-note">
             <span className="status-dot" />
-            知识库目录已建立，正文待填充。模型补充会单独标注来源。
+            上传题目照片并完成分析后，与题目相连的知识点会出现在这里。
           </p>
         )}
       </section>
@@ -318,6 +331,158 @@ function LinkPicker({ question, wiki, onClose, onSave, busy }) {
   );
 }
 
+function ClassificationEditor({
+  question,
+  sessionId,
+  wiki,
+  busy,
+  act,
+  onClose,
+}) {
+  const current = question.classification || {};
+  const condition = (prefix) =>
+    (current.conditions || [])
+      .find((value) => value.startsWith(`${prefix}:`))
+      ?.slice(prefix.length + 1) || "";
+  const initialId =
+    current.primary_knowledge_id ||
+    question.links?.[0]?.knowledge_id ||
+    wiki?.nodes?.[0]?.id ||
+    "";
+  const [taxonomy, setTaxonomy] = useState(null);
+  const [draft, setDraft] = useState({
+    knowledge_ids: current.knowledge_ids || (initialId ? [initialId] : []),
+    primary_knowledge_id: initialId,
+    method: current.method || "concept",
+    variant: current.variant || "direct",
+    difficulty: current.difficulty || "basic",
+    target: condition("target"),
+    methodCondition: condition("method"),
+    boundary: condition("boundary"),
+    reason: current.reason || "",
+  });
+  useEffect(() => {
+    api
+      .reviewTaxonomy()
+      .then(setTaxonomy)
+      .catch(() =>
+        setTaxonomy({ methods: [], variants: [], difficulties: [] }),
+      );
+  }, []);
+  const save = () => {
+    const allowed = {
+      knowledgeIds: new Set((wiki?.nodes || []).map((node) => node.id)),
+      methods: new Set((taxonomy?.methods || []).map((item) => item.id)),
+      variants: new Set((taxonomy?.variants || []).map((item) => item.id)),
+      difficulties: new Set(
+        (taxonomy?.difficulties || []).map((item) => item.id),
+      ),
+    };
+    let payload;
+    try {
+      payload = buildClassification(draft, allowed);
+    } catch (error) {
+      window.alert(error.message);
+      return;
+    }
+    act(() => api.classifyQuestion(sessionId, question.id, payload), onClose);
+  };
+  return (
+    <Modal title="纠正题目分类" onClose={onClose}>
+      <div className="modal-body classification-editor">
+        <p className="muted">
+          只分类题目要求，不推断你的错因。人工确认将保留为可修改的分类。
+        </p>
+        <label>
+          主知识点
+          <select
+            value={draft.primary_knowledge_id}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                primary_knowledge_id: e.target.value,
+                knowledge_ids: [e.target.value],
+              })
+            }
+          >
+            <option value="">请选择</option>
+            {(wiki?.nodes || []).map((node) => (
+              <option key={node.id} value={node.id}>
+                {node.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="classification-grid">
+          <label>
+            方法
+            <select
+              value={draft.method}
+              onChange={(e) => setDraft({ ...draft, method: e.target.value })}
+            >
+              {(taxonomy?.methods || []).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            变体
+            <select
+              value={draft.variant}
+              onChange={(e) => setDraft({ ...draft, variant: e.target.value })}
+            >
+              {(taxonomy?.variants || []).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            估计难度
+            <select
+              value={draft.difficulty}
+              onChange={(e) =>
+                setDraft({ ...draft, difficulty: e.target.value })
+              }
+            >
+              {(taxonomy?.difficulties || []).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {[
+          ["target", "目标"],
+          ["methodCondition", "方法条件"],
+          ["boundary", "边界条件"],
+          ["reason", "分类理由"],
+        ].map(([key, label]) => (
+          <label key={key}>
+            {label}
+            <input
+              value={draft[key]}
+              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+            />
+          </label>
+        ))}
+      </div>
+      <footer className="modal-footer">
+        <button className="secondary" onClick={onClose}>
+          取消
+        </button>
+        <button className="primary" disabled={busy || !taxonomy} onClick={save}>
+          保存分类
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
 function QuestionCard({
   question: q,
   session,
@@ -329,12 +494,14 @@ function QuestionCard({
   wiki,
   onKnowledge,
   onExpand,
+  onOpenQuestion,
 }) {
   const [editing, setEditing] = useState(false),
     [draft, setDraft] = useState(q),
     [answer, setAnswer] = useState(""),
     [reference, setReference] = useState(""),
     [linking, setLinking] = useState(false),
+    [classifying, setClassifying] = useState(false),
     [retrying, setRetrying] = useState(false),
     [revealed, setRevealed] = useState(false),
     [completenessConfirmed, setCompletenessConfirmed] = useState(false);
@@ -563,10 +730,27 @@ function QuestionCard({
             {l.name}
           </button>
         ))}
-        <button className="link-edit" disabled={structuralDisabled} onClick={() => setLinking(true)}>
+        <button
+          className="link-edit"
+          disabled={structuralDisabled}
+          onClick={() => setLinking(true)}
+        >
           <Link2 size={13} />
           {q.links?.length ? "编辑关联" : "关联知识"}
         </button>
+        <button
+          className="link-edit"
+          disabled={structuralDisabled}
+          onClick={() => setClassifying(true)}
+        >
+          <Pencil size={13} />
+          {q.classification ? "纠正分类" : "手动分类"}
+        </button>
+        {q.classification && (
+          <span className="muted small">
+            难度与理由为估计，不是权威判定 · {q.classification.reason}
+          </span>
+        )}
       </div>
       {!editing && (
         <div className="question-actions">
@@ -641,7 +825,7 @@ function QuestionCard({
           )}
           <button
             className="secondary compact"
-              disabled={actionDisabled}
+            disabled={actionDisabled}
             onClick={() => {
               onSelect();
               act(() => api.hint(session.id, q.id));
@@ -657,7 +841,11 @@ function QuestionCard({
               ? "打开已有提示"
               : "给我一点提示"}
           </button>
-          <button className="text-link" disabled={actionDisabled} onClick={onSelect}>
+          <button
+            className="text-link"
+            disabled={actionDisabled}
+            onClick={onSelect}
+          >
             <MessageSquare size={14} />
             追问这道题
           </button>
@@ -695,6 +883,26 @@ function QuestionCard({
             source={q.analysis.source}
             onKnowledge={onKnowledge}
           />
+          {q.related_history?.length > 0 && (
+            <div className="related-history">
+              <span className="eyebrow">相关的个人学习记录</span>
+              {q.related_history.slice(0, 2).map((item) => (
+                <button
+                  key={`${item.session_id}-${item.question_id}-${item.revision}`}
+                  className="linked-question"
+                  onClick={() =>
+                    onOpenQuestion?.(item.session_id, item.question_id)
+                  }
+                >
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>{item.state}</small>
+                  </span>
+                  <ArrowRight size={14} />
+                </button>
+              ))}
+            </div>
+          )}
           <details className="recheck">
             <summary>对答案有疑问？补充依据复核</summary>
             <textarea
@@ -735,6 +943,16 @@ function QuestionCard({
           }
         />
       )}
+      {classifying && (
+        <ClassificationEditor
+          question={q}
+          sessionId={session.id}
+          wiki={wiki}
+          busy={busy}
+          act={act}
+          onClose={() => setClassifying(false)}
+        />
+      )}
     </article>
   );
 }
@@ -764,7 +982,8 @@ export function Conversation({
     setText("");
   }, [selected?.id]);
   const send = async () => {
-    if (!busy && !unavailable && text.trim() && (await onSend(text.trim()))) setText("");
+    if (!busy && !unavailable && text.trim() && (await onSend(text.trim())))
+      setText("");
   };
   return (
     <section className="conversation">
@@ -873,6 +1092,7 @@ export default function Study({
   knowledge,
   onClearKnowledge,
   onSend,
+  onOpenQuestion,
 }) {
   const stage = analysisStage(session.status);
   const structuralDisabled = busy || session.processing;
@@ -995,6 +1215,7 @@ export default function Study({
                 q.id,
               )
             }
+            onOpenQuestion={onOpenQuestion}
           />
         ))}
         {!session.questions?.length && (
@@ -1004,9 +1225,7 @@ export default function Study({
           !structuralDisabled && (
             <button
               className="secondary"
-              onClick={() =>
-                run(() => api.process(session.id), update)
-              }
+              onClick={() => run(() => api.process(session.id), update)}
             >
               <RefreshCw size={15} />
               重新识别并解答

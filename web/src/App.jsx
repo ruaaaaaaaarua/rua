@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   BookOpen,
+  LibraryBig,
   ChevronRight,
   CircleHelp,
   Home,
@@ -19,6 +20,7 @@ import Study, { Dashboard } from "./Study.jsx";
 import Knowledge from "./Knowledge.jsx";
 import Reviews from "./Reviews.jsx";
 import Settings from "./Settings.jsx";
+import Archive from "./Archive.jsx";
 import { dateText } from "./ui.jsx";
 import "./styles.css";
 
@@ -26,27 +28,28 @@ const nav = [
   { id: "study", name: "学习台", Icon: Home },
   { id: "wiki", name: "知识库", Icon: BookOpen },
   { id: "reviews", name: "复习", Icon: RotateCcw },
+  { id: "archive", name: "我的档案", Icon: LibraryBig },
 ];
 export function mergePolledSession(current, latest) {
   if (!current || current.id !== latest.id) return current;
-  const savedIds = new Set((latest.messages || []).map((message) => message.id));
-  const transient = (current.messages || []).filter(
-    (message) => {
-      if (!message.transient || savedIds.has(message.id)) return false;
-      if (message.role !== "user") return true;
-      const known = new Set(message.known_message_ids || []);
-      const persisted = (latest.messages || []).some(
-        (saved) =>
-          !known.has(saved.id) &&
-          saved.role === "user" &&
-          saved.content === message.content &&
-          (saved.question_id || null) === (message.question_id || null) &&
-          (saved.question_revision || null) ===
-            (message.question_revision || null),
-      );
-      return !persisted;
-    },
+  const savedIds = new Set(
+    (latest.messages || []).map((message) => message.id),
   );
+  const transient = (current.messages || []).filter((message) => {
+    if (!message.transient || savedIds.has(message.id)) return false;
+    if (message.role !== "user") return true;
+    const known = new Set(message.known_message_ids || []);
+    const persisted = (latest.messages || []).some(
+      (saved) =>
+        !known.has(saved.id) &&
+        saved.role === "user" &&
+        saved.content === message.content &&
+        (saved.question_id || null) === (message.question_id || null) &&
+        (saved.question_revision || null) ===
+          (message.question_revision || null),
+    );
+    return !persisted;
+  });
   return { ...latest, messages: [...(latest.messages || []), ...transient] };
 }
 
@@ -54,7 +57,10 @@ export function questionContext(session, selectedId, explicitId) {
   const questionId = explicitId || selectedId;
   if (!questionId) return {};
   const question = session?.questions?.find((item) => item.id === questionId);
-  return { question_id: questionId, question_revision: question?.revision || 1 };
+  return {
+    question_id: questionId,
+    question_revision: question?.revision || 1,
+  };
 }
 
 export default function App() {
@@ -63,7 +69,9 @@ export default function App() {
     [session, setSession] = useState(null);
   const [wiki, setWiki] = useState(null),
     [reviews, setReviews] = useState({ items: [], due_count: 0, total: 0 }),
-    [settings, setSettings] = useState(null);
+    [settings, setSettings] = useState(null),
+    [archive, setArchive] = useState(null),
+    [reviewLimit, setReviewLimit] = useState(5);
   const [chapter, setChapter] = useState("all"),
     [node, setNode] = useState(null),
     [chatKnowledge, setChatKnowledge] = useState(null);
@@ -79,14 +87,16 @@ export default function App() {
     setSession(value);
   };
   const refresh = async () => {
-    const [ss, ww, rr] = await Promise.all([
+    const [ss, ww, rr, aa] = await Promise.all([
       api.sessions(),
       api.wiki(),
-      api.reviews(),
+      api.reviews(reviewLimit),
+      api.archive(),
     ]);
     setSessions(ss.filter((s) => !s.demo));
     setWiki(ww);
     setReviews(rr);
+    setArchive(aa);
   };
   useEffect(() => {
     refresh()
@@ -144,7 +154,10 @@ export default function App() {
       setSelected(qid);
       setChatKnowledge(null);
       setMobile(false);
-      if (s.processing || ["recognizing", "extracted", "analyzing"].includes(s.status)) {
+      if (
+        s.processing ||
+        ["recognizing", "extracted", "analyzing"].includes(s.status)
+      ) {
         s = await api.process(id);
         updateSession((current) => (current?.id === id ? s : current));
       }
@@ -235,31 +248,41 @@ export default function App() {
               known_message_ids: knownMessageIds,
               ...tags,
             },
-            { id: transientId, role: "assistant", content: "", transient: true, ...tags },
+            {
+              id: transientId,
+              role: "assistant",
+              content: "",
+              transient: true,
+              ...tags,
+            },
           ],
         };
       });
       let streamed = "";
       try {
-        const updated = await api.messageStream(id, {
-        text,
-        ...(tags.question_id ? { question_id: tags.question_id } : {}),
-        ...(chatKnowledge ? { knowledge_id: chatKnowledge.id } : {}),
-        }, (delta) => {
-          streamed += delta;
-          updateSession((current) =>
-            current?.id === id
-              ? {
-                  ...current,
-                  messages: current.messages.map((message) =>
-                    message.id === transientId
-                      ? { ...message, content: streamed }
-                      : message,
-                  ),
-                }
-              : current,
-          );
-        });
+        const updated = await api.messageStream(
+          id,
+          {
+            text,
+            ...(tags.question_id ? { question_id: tags.question_id } : {}),
+            ...(chatKnowledge ? { knowledge_id: chatKnowledge.id } : {}),
+          },
+          (delta) => {
+            streamed += delta;
+            updateSession((current) =>
+              current?.id === id
+                ? {
+                    ...current,
+                    messages: current.messages.map((message) =>
+                      message.id === transientId
+                        ? { ...message, content: streamed }
+                        : message,
+                    ),
+                  }
+                : current,
+            );
+          },
+        );
         updateSession((current) => (current?.id === id ? updated : current));
         return updated;
       } catch (e) {
@@ -496,6 +519,21 @@ export default function App() {
               run={run}
               busy={busy}
               refresh={() => refresh().catch((e) => setError(e.message))}
+              onOpenQuestion={openSession}
+              onBudget={(limit) => {
+                setReviewLimit(limit);
+                api
+                  .reviews(limit)
+                  .then(setReviews)
+                  .catch((e) => setError(e.message));
+              }}
+            />
+          ) : page === "archive" ? (
+            <Archive
+              data={archive}
+              busy={busy}
+              run={run}
+              refresh={setArchive}
             />
           ) : session ? (
             <Study
@@ -512,6 +550,7 @@ export default function App() {
               knowledge={chatKnowledge}
               onClearKnowledge={() => setChatKnowledge(null)}
               onSend={send}
+              onOpenQuestion={openSession}
             />
           ) : (
             <Dashboard
