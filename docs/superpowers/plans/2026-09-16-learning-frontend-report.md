@@ -119,3 +119,5 @@ Corrections now:
 - Label medal descriptions as earning conditions and list available evidence records consistently.
 - Encode dynamic session/question/review URL path segments.
 - Translate raw review difficulty codes and normalize trailing punctuation in recommendation reasons.
+
+Final re-review covered the recovery sequence “save rejected → eligibility GET failed → later save accepted.” A new focused test first failed because no accepted-save transition existed. Successful saves now normalize the authoritative response, clear the prior eligibility error, re-enable medal controls, and forward the same valid fresh archive data to App state. The archive-focused suite is 11/11 passing after this correction.

@@ -3,6 +3,7 @@ import { Check, Download, Lock, Save } from "lucide-react";
 import { api } from "./api.js";
 import {
   archiveSvg,
+  acceptedArchiveSave,
   changeArchiveProfile,
   downloadArchiveSvg,
   medalArtwork,
@@ -44,9 +45,11 @@ export default function Archive({ data, busy, run, refresh }) {
     const result = await run(
       () => api.saveArchive(profile),
       (next) => {
-        setProfile(normalizeArchive(next).profile);
+        const accepted = acceptedArchiveSave(next);
+        setProfile(accepted.profile);
+        setEligibilityError(accepted.error);
         setFeedback("已保存到本机档案");
-        refresh?.(next);
+        refresh?.(accepted.data);
       },
     );
     if (!result) {

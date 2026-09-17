@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import Archive from "./Archive.jsx";
 import {
   archiveSvg,
+  acceptedArchiveSave,
   changeArchiveProfile,
   estimatedTextWidth,
   normalizeArchive,
@@ -148,5 +149,19 @@ describe("archive share output", () => {
     expect(recovered.profile.selected_medals).toEqual([]);
     expect(recovered.data).toBeNull();
     expect(recovered.error).toContain("无法刷新");
+  });
+
+  it("clears a prior recovery error after a truthfully successful retry", async () => {
+    const failed = await recoverRejectedArchive(data.profile, async () => {
+      throw new Error("offline");
+    });
+    expect(failed.error).toContain("无法刷新");
+
+    const saved = acceptedArchiveSave({
+      ...data,
+      profile: { ...data.profile, selected_medals: ["earned"] },
+    });
+    expect(saved.profile.selected_medals).toEqual(["earned"]);
+    expect(saved.error).toBe("");
   });
 });

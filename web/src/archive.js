@@ -22,6 +22,10 @@ export async function recoverRejectedArchive(profile, fetchArchive) {
   }
 }
 
+export function acceptedArchiveSave(data) {
+  return { profile: normalizeArchive(data).profile, data, error: "" };
+}
+
 export function normalizeArchive(data = {}) {
   const profile = data.profile || {};
   const medals = Array.isArray(data.medals) ? data.medals : [];
