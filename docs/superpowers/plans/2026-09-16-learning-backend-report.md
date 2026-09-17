@@ -151,4 +151,5 @@ Full backend regression and knowledge validation:
 
 ## Commit
 
-Recorded after final verification; see commit listed in the task handoff.
+- `dec6f93 feat: add personal learning backend`
+- `8937378 fix: serialize review organization`
