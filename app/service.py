@@ -9,6 +9,9 @@ from .models import Option, validate_choice_answer
 from .providers import ProviderError
 from .store import message, normalized_answer, uid
 from .study import StudyRecords, later
+from .archive import Archive
+from .classification import validate_classification
+from .personal import related_history
 
 
 def public_session(session):
@@ -18,6 +21,9 @@ def public_session(session):
         q.pop('solution', None)
         q.pop('reasoning', None)
         q.pop('confidence', None)
+        q.pop('retrieval_audit', None)
+        if not q.get('revealed'):
+            q.pop('related_history', None)
         a = q.get('analysis') or {}
         for key in ('diagnosis', 'distinction', 'error_type', 'reasoning_ok', 'hint'):
             a.pop(key, None)
@@ -35,6 +41,7 @@ class LearningService:
         self.gateway_factory = gateway_factory
         self.library = KnowledgeLibrary(knowledge_dir)
         self.study = StudyRecords(store, self.library)
+        self.archive = Archive(store, self.study)
 
     def gateway(self):
         gateway = self.gateway_factory(self.store.settings())
@@ -75,6 +82,15 @@ class LearningService:
         for q in session['questions']:
             q['links'] = self.study.links(session['id'], q['id'])
             q.setdefault('candidates', [])
+            if q.get('related_history'):
+                valid = []
+                for item in q['related_history'][:2]:
+                    source = self.store.get_session(item['session_id'])
+                    other = next((x for x in (source or {}).get('questions', [])
+                                  if x['id'] == item['question_id']), None)
+                    if other and other.get('revision', 1) == item['revision'] and self.is_confirmed(other):
+                        valid.append(item)
+                q['related_history'] = valid
         return session
 
     def wiki_context(self, question=None, text='', kid=None):
@@ -82,6 +98,9 @@ class LearningService:
         if kid:
             ids.append(kid)
         return self.library.context(text or (question or {}).get('text', ''), ids)
+
+    def classification_catalog(self):
+        return [{"id": node["id"], "name": node["name"]} for node in self.library.catalog()["nodes"]]
 
     @staticmethod
     def citations(context):
@@ -197,7 +216,8 @@ class LearningService:
         async def solve_one(q):
             self.prepare_question(s, q)
             context = self.wiki_context(q)
-            task = {**q, 'wiki_context': context, 'reference_note': json.dumps(self.references(s, q['id']), ensure_ascii=False)}
+            task = {**q, 'wiki_context': context, 'reference_note': json.dumps(self.references(s, q['id']), ensure_ascii=False),
+                    'classification_catalog': self.classification_catalog()}
             try:
                 async with semaphore:
                     solution = await gateway.solve(task)
@@ -238,6 +258,19 @@ class LearningService:
             correct=normalized_answer(q['user_answer'], q['kind']) == normalized_answer(solution.get('answer'), q['kind']) if supplied and valid else None,
             source='wiki' if context else 'model', citations=self.citations(context),
             knowledge_status='available' if context else 'empty')
+        q['retrieval_audit'] = {'core': [{k: n[k] for k in ('id', 'version')} for n in context],
+                                'provider': self.provider_identity('solve'), 'history': []}
+        if valid and q.get('classification', {}).get('source') != 'manual':
+            try:
+                classification = validate_classification(solution.get('classification'),
+                    {node['id'] for node in self.library.catalog()['nodes']})
+            except (TypeError, ValueError):
+                classification = None
+            if classification:
+                classification['source'] = 'ai'
+                q['classification'] = classification
+                if not q.get('links_managed'):
+                    self.study.attach(s, q, classification['knowledge_ids'], source='classified', managed=False)
         self.study.record_solution(s, q)
         self.store.save_session(s)
 
@@ -255,7 +288,7 @@ class LearningService:
             self.prepare_question(s, q)
             context = self.wiki_context(q)
             contexts.append(context)
-            tasks.append(copy.deepcopy({**q, 'wiki_context': context,
+            tasks.append(copy.deepcopy({**q, 'wiki_context': context, 'classification_catalog': self.classification_catalog(),
                 'reference_note': json.dumps(self.references(s, q['id']), ensure_ascii=False)}))
         rows = {}
         if len(tasks) > 1 and callable(getattr(gateway, 'solve_batch', None)):
@@ -349,6 +382,15 @@ class LearningService:
             history=self.thread_messages(s, q)[-12:], wiki_context=context, hint_only=hint_only,
             learning=[dict(knowledge_id=k, **self.study.learning(k)) for k in related_ids],
             references=self.references(s, qid))
+        history = related_history(self.store, self.study, s['id'], q) if q and q.get('revealed') and not hint_only else []
+        if history:
+            payload['related_history'] = history
+            q['related_history'] = [{k: item[k] for k in ('session_id', 'question_id', 'revision', 'title', 'state', 'source_url')}
+                                    for item in history]
+        if q:
+            q['retrieval_audit'] = {'core': [{k: n[k] for k in ('id', 'version')} for n in context],
+                                    'provider': self.provider_identity('chat'),
+                                    'history': [{k: item[k] for k in ('session_id', 'question_id', 'revision')} for item in history]}
         # Freeze model context before background work can append later questions/results.
         payload = copy.deepcopy(payload)
         affected = list([q] if q else s['questions'])
@@ -408,9 +450,90 @@ class LearningService:
         q['revision'] = q.get('revision', 1) + 1
         q.pop('analysis', None)
         q.pop('solution', None)
+        q.pop('classification', None)
+        q.pop('related_history', None)
+        q.pop('retrieval_audit', None)
         q['revealed'] = False
         # Do not erase prior exposure when an answer or transcript is corrected.
         q.setdefault('help_seen', False)
+
+    def provider_identity(self, task):
+        settings = self.store.settings()
+        ident = settings.get('tasks', {}).get(task)
+        profile = next((p for p in settings.get('profiles', []) if p.get('id') == ident), {})
+        return {k: profile.get(k, '') for k in ('id', 'name', 'model')}
+
+    def set_classification(self, s, q, value):
+        data = validate_classification(value, {node['id'] for node in self.library.catalog()['nodes']})
+        data['source'] = 'manual'
+        q['classification'] = data
+        # The explicit correction itself is the authoritative user choice.
+        self.study.attach(s, q, data['knowledge_ids'], source='classification-manual', managed=True)
+        self.store.save_session(s)
+        return self.decorate(s)
+
+    async def organize(self, scoped=None):
+        candidates = []
+        for s in self.store.sessions(full=True):
+            for q in s.get('questions', []):
+                if self.is_confirmed(q) and not q.get('classification') and (not scoped or q['id'] in scoped):
+                    candidates.append((s, q, q.get('revision', 1)))
+        candidates = candidates[:12]
+        classified = failed = 0
+        gateway = self.gateway()
+        parallel_for = getattr(gateway, 'parallel_for', None)
+        semaphore = asyncio.Semaphore(min(4, parallel_for('solve') if callable(parallel_for) else 2))
+
+        async def classify_one(candidate):
+            s, q, revision = candidate
+            try:
+                task = {**q, 'wiki_context': self.wiki_context(q), 'classification_catalog': self.classification_catalog()}
+                async with semaphore:
+                    result = await gateway.solve(task)
+                data = validate_classification(result.get('classification'),
+                    {node['id'] for node in self.library.catalog()['nodes']})
+                return candidate, data
+            except Exception:
+                return candidate, None
+
+        results = await asyncio.gather(*(classify_one(candidate) for candidate in candidates))
+        for (s, q, revision), data in results:
+            try:
+                if not data:
+                    failed += 1
+                    continue
+                current = self.store.get_session(s['id'])
+                current_q = self.question(current, q['id'])
+                if current_q.get('revision', 1) != revision or current_q.get('classification'):
+                    failed += 1
+                    continue
+                data['source'] = 'ai'
+                current_q['classification'] = data
+                if not current_q.get('links_managed'):
+                    self.study.attach(current, current_q, data['knowledge_ids'], source='classified', managed=False)
+                self.store.save_session(current)
+                classified += 1
+            except Exception:
+                failed += 1
+        remaining = sum(1 for s in self.store.sessions(full=True) for q in s.get('questions', [])
+                        if self.is_confirmed(q) and not q.get('classification'))
+        return {'classified': classified, 'remaining': remaining, 'failed': failed}
+
+    async def review_hint(self, rid):
+        run, q = self.study.prepare_hint(rid)
+        if run.get('hint'):
+            return {**run, 'hint': run['hint'], 'help_kind': 'assisted'}
+        gateway = self.gateway()
+        payload = {'questions': [{k: q[k] for k in ('id', 'text', 'kind', 'options', 'number') if k in q}],
+                   'history': [], 'wiki_context': self.wiki_context(q), 'hint_only': True,
+                   'learning': [], 'references': []}
+        reply = await gateway.chat(payload, '给一条不透露答案的提示。', 'hint')
+        import re
+        content = reply['content']
+        if re.search(r'(?:答案|选择|选项|应选|选)\s*(?:是|为|：|:)?\s*[A-H](?![a-z])', content):
+            content = '先检查题目给定条件与相关概念的适用范围，再尝试下一步推导。'
+        self.study.cache_hint(run, content)
+        return {**run, 'hint': content, 'help_kind': 'assisted'}
 
     async def recheck(self, s, qid, text):
         q = self.question(s, qid)

@@ -77,7 +77,7 @@ def test_links_are_personal_and_wiki_is_unchanged(tmp_path):
     assert len(c.get('/api/wiki/psa-per-unit').json()['questions']) == 1
     c.put(f'/api/sessions/{sid}/questions/q1/links', json={'knowledge_ids': []})
     c.post(f'/api/sessions/{sid}/analyze')
-    assert c.get('/api/wiki/psa-per-unit').json()['questions'] == []
+    assert c.get('/api/wiki/psa-per-unit').status_code == 404
 
 
 def test_edit_invalidates_review_and_historical_verdict(tmp_path):

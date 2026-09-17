@@ -21,7 +21,7 @@ def test_legacy_diagnosis_never_becomes_new_learner_state(tmp_path):
     q=c.get(f'/api/sessions/{sid}').json()['questions'][0]
     assert 'diagnosis' not in q['analysis']
     assert c.get('/api/reviews').json()['total'] == 0
-    assert c.get('/api/wiki/psa-per-unit').json()['learning']['event_count'] == 0
+    assert c.get('/api/wiki/psa-per-unit').status_code == 404
 
 
 def test_multi_concept_error_is_associated_fact_not_diagnosis(tmp_path):

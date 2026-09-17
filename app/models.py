@@ -1,6 +1,7 @@
 from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+from .classification import optional_classification
 
 
 class StrictModel(BaseModel):
@@ -51,6 +52,12 @@ class Solution(StrictModel):
     explanation: str = Field(min_length=1)
     valid: bool = True
     status: Literal['confirmed', 'pending'] = 'confirmed'
+    classification: Optional[dict] = None
+
+    @field_validator('classification', mode='before')
+    @classmethod
+    def tolerate_optional_metadata(cls, value):
+        return optional_classification(value)
 
     @field_validator('answer', mode='before')
     @classmethod

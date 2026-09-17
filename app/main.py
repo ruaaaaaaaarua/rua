@@ -16,6 +16,9 @@ from .store import Store, TASKS, message, uid
 from .service import LearningService, public_session
 from .images import normalize_image, MAX_INPUT_BYTES
 from .jobs import StudyJobs
+from .archive import MEDALS
+from .classification import Classification, taxonomy
+from .personal import linked_ids, safe_node
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -55,6 +58,23 @@ class Links(Input):
 class ReviewStart(Input):
     session_id:str
     question_id:str
+
+class Organize(Input):
+    question_ids:Optional[List[str]]=Field(default=None,max_length=12)
+
+class ArchiveProfile(Input):
+    nickname:str=Field(default='学习者',max_length=30)
+    signature:str=Field(default='',max_length=100)
+    theme:Literal['paper','blueprint']='paper'
+    selected_medals:List[str]=Field(default_factory=list,max_length=3)
+    show_stats:bool=False
+
+    @field_validator('selected_medals')
+    @classmethod
+    def valid_medals(cls,value):
+        if len(value)!=len(set(value)) or any(v not in MEDALS for v in value):
+            raise ValueError('勋章选择无效')
+        return value
 
 class Profile(Input):
     id:str=Field(default='',max_length=100)
@@ -109,6 +129,7 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
     app.state.store=store;app.state.service=service
     app.state.jobs=jobs
     locks={}
+    organizing=False
 
     @app.exception_handler(ValueError)
     async def invalid_operation(request,exc):
@@ -234,6 +255,7 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
 
     @app.post('/api/sessions/{sid}/process')
     async def process(sid:str):
+        if organizing:raise HTTPException(409,'AI 正在整理历史题目，请稍后开始后台处理。')
         async with locked(sid,background=True) as s:
             return public_session(jobs.start(s))
 
@@ -313,8 +335,16 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
             q=service.question(s,qid)
             try: service.study.attach(s,q,body.knowledge_ids)
             except ValueError as exc: raise HTTPException(422,str(exc))
+            if q.get('classification') and sorted(q['classification'].get('knowledge_ids',[])) != sorted(body.knowledge_ids):
+                q.pop('classification',None)
             service.decorate(s);store.save_session(s)
             return public_session(s)
+
+    @app.patch('/api/sessions/{sid}/questions/{qid}/classification')
+    async def classify_question(sid:str,qid:str,body:Classification):
+        async with locked(sid) as s:
+            try:return public_session(service.set_classification(s,service.question(s,qid),body.model_dump()))
+            except ValueError as exc:raise HTTPException(422,str(exc))
 
     @app.post('/api/sessions/{sid}/questions/{qid}/retry')
     async def retry_question(sid:str,qid:str,body:Answer):
@@ -365,18 +395,26 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
 
     @app.get('/api/wiki')
     def wiki(q:str=''):
-        return service.library.listing(q)
+        visible=linked_ids(service.study,store.sessions(full=True))
+        catalog=service.library.catalog()
+        nodes=service.library.search(q,200) if q else catalog['nodes']
+        return {'subject':catalog['subject'],'version':catalog['version'],'chapters':catalog['chapters'],
+                'published_count':sum(n['status']=='published' for n in nodes if n['id'] in visible),
+                'nodes':[safe_node(n,visible) for n in nodes if n['id'] in visible]}
 
     @app.get('/api/wiki/{kid}')
     def wiki_node(kid:str):
+        visible=linked_ids(service.study,store.sessions(full=True))
+        if kid not in visible:raise HTTPException(404,'知识点尚未与个人题目关联')
         try: node=service.library.get(kid)
         except ValueError as exc: raise HTTPException(404,str(exc))
-        return {**node,'questions':service.study.questions(kid),'learning':service.study.learning(kid)}
+        return {**safe_node(node,visible,detail=True),'questions':service.study.questions(kid),'learning':service.study.learning(kid)}
 
     @app.get('/api/knowledge')
     def knowledge():
+        visible=linked_ids(service.study,store.sessions(full=True))
         return [dict(id=n['id'],name=n['name'],subject='电力系统分析',chapter=n['chapter_id'],
-                     **service.study.learning(n['id'])) for n in service.library.catalog()['nodes']]
+                     **service.study.learning(n['id'])) for n in service.library.catalog()['nodes'] if n['id'] in visible]
 
     @app.get('/api/framework')
     def framework():
@@ -384,8 +422,20 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
                     note='章节与知识点骨架；正文待维护者填充。')
 
     @app.get('/api/reviews')
-    def reviews():
-        return service.study.queue()
+    def reviews(limit:int=5):
+        if limit not in (3,5,10):raise HTTPException(422,'limit 仅支持 3、5、10')
+        return service.study.queue(limit)
+
+    @app.get('/api/review-taxonomy')
+    def review_taxonomy():return taxonomy()
+
+    @app.post('/api/reviews/organize')
+    async def organize_reviews(body:Organize):
+        nonlocal organizing
+        if jobs.active or organizing:raise HTTPException(409,'后台整理期间暂不能重新分类。')
+        organizing=True
+        try:return await service.organize(body.question_ids)
+        finally:organizing=False
 
     @app.post('/api/reviews/start')
     async def start_review(body:ReviewStart):
@@ -402,6 +452,20 @@ def create_app(data_dir=None,gateway_factory=None,knowledge_dir=None):
     async def answer_review(rid:str,body:Answer):
         async with locked(service.study.run_session(rid)):
             return service.study.review(rid,body.answer)
+
+    @app.post('/api/reviews/{rid}/hint')
+    async def hint_review(rid:str):
+        async with locked(service.study.run_session(rid),background=True):
+            try:return await service.review_hint(rid)
+            except ValueError as exc:raise HTTPException(400,str(exc))
+
+    @app.get('/api/archive')
+    def archive():return service.archive.get()
+
+    @app.put('/api/archive')
+    def update_archive(body:ArchiveProfile):
+        try:return service.archive.save(body.model_dump())
+        except ValueError as exc:raise HTTPException(422,str(exc))
 
     @app.get('/api/settings')
     def settings():return store.settings(public=True)

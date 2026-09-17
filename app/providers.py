@@ -165,7 +165,7 @@ class ModelGateway:
         )
         if result.valid and result.status == "confirmed":
             self._validate_answer(question, result.answer)
-        return result.model_dump()
+        return result.model_dump(exclude_none=True)
 
     async def solve_batch(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         result = await self._call(
@@ -181,7 +181,7 @@ class ModelGateway:
                     self._validate_answer(questions[item.index], item.answer)
                 except ProviderError:
                     continue
-            items.append(item.model_dump())
+            items.append(item.model_dump(exclude_none=True))
         return items
 
     async def chat(self, context: Any, text: str, mode: str) -> Dict[str, Any]:
