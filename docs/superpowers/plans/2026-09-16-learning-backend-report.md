@@ -153,3 +153,4 @@ Full backend regression and knowledge validation:
 
 - `dec6f93 feat: add personal learning backend`
 - `8937378 fix: serialize review organization`
+- `457e3de fix: invalidate stale personal chat history`
