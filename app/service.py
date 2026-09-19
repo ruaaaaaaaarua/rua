@@ -21,6 +21,7 @@ def public_session(session):
         q.pop('solution', None)
         q.pop('reasoning', None)
         q.pop('confidence', None)
+        q.pop('candidates', None)
         q.pop('retrieval_audit', None)
         q.pop('retrieval_audits', None)
         if not q.get('revealed'):
@@ -558,7 +559,7 @@ class LearningService:
     async def review_hint(self, rid):
         run, q = self.study.prepare_hint(rid)
         if run.get('hint'):
-            return {**run, 'hint': run['hint'], 'help_kind': 'assisted'}
+            return self.public_review_hint(run, run['hint'])
         gateway = self.gateway()
         payload = {'questions': [{k: q[k] for k in ('id', 'text', 'kind', 'options', 'number') if k in q}],
                    'history': [], 'wiki_context': self.wiki_context(q), 'hint_only': True,
@@ -569,7 +570,14 @@ class LearningService:
         if re.search(r'(?:答案|选择|选项|应选|选)\s*(?:是|为|：|:)?\s*[A-H](?![a-z])', content):
             content = '先检查题目给定条件与相关概念的适用范围，再尝试下一步推导。'
         self.study.cache_hint(run, content)
-        return {**run, 'hint': content, 'help_kind': 'assisted'}
+        return self.public_review_hint(run, content)
+
+    @staticmethod
+    def public_review_hint(run, hint):
+        allowed = ('id', 'session_id', 'question_id', 'revision', 'status', 'created_at',
+                   'source_label', 'question')
+        return {**{key: run[key] for key in allowed if key in run},
+                'hint': hint, 'help_kind': 'assisted'}
 
     async def recheck(self, s, qid, text):
         q = self.question(s, qid)

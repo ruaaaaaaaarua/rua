@@ -79,6 +79,18 @@ def test_personal_wiki_only_exposes_linked_cards_and_no_internal_metadata(tmp_pa
     assert "HIDDEN_PUBLISHED_MARKER" not in json.dumps(listing)
 
 
+def test_public_session_never_exposes_unlinked_library_candidates(tmp_path):
+    c, app, _, sid = setup(tmp_path)
+    s = app.state.store.get_session(sid)
+    s["questions"][0]["candidates"] = [
+        {"id": "psa-transformer", "name": "UNLINKED_TRANSFORMER", "chapter_id": "psa-components"}
+    ]
+    app.state.store.save_session(s)
+    public = c.get(f"/api/sessions/{sid}").json()
+    assert "UNLINKED_TRANSFORMER" not in json.dumps(public)
+    assert public["questions"][0].get("candidates", []) == []
+
+
 def test_linked_draft_is_an_unfilled_card_never_a_body(tmp_path):
     c, _, _, sid = setup(tmp_path)
     c.put(f"/api/sessions/{sid}/questions/q1/links", json={"knowledge_ids": ["psa-per-unit"]})
@@ -135,6 +147,26 @@ def test_review_hint_has_no_answer_and_contaminates_simultaneous_runs(tmp_path):
     assert "answer" not in result and "explanation" not in result
     assert app.state.service.study.review(second["id"], "B")["help_kind"] == "assisted"
     assert gateway.inputs[-1]["hint_only"] is True
+
+
+def test_review_hint_stays_sanitized_before_and_after_reveal(tmp_path):
+    c, app, _, sid = setup(tmp_path)
+    c.post(f"/api/sessions/{sid}/analyze")
+    study = app.state.service.study
+
+    cached = study.start(sid, "q1")
+    first = c.post(f"/api/reviews/{cached['id']}/hint").json()
+    assert "answer" not in first and "explanation" not in first
+    c.post(f"/api/reviews/{cached['id']}/reveal")
+    repeated = c.post(f"/api/reviews/{cached['id']}/hint").json()
+    assert repeated["hint"] == first["hint"] and repeated["help_kind"] == "assisted"
+    assert "answer" not in repeated and "explanation" not in repeated
+
+    revealed = study.start(sid, "q1")
+    c.post(f"/api/reviews/{revealed['id']}/reveal")
+    after_reveal = c.post(f"/api/reviews/{revealed['id']}/hint").json()
+    assert after_reveal["help_kind"] == "assisted"
+    assert "answer" not in after_reveal and "explanation" not in after_reveal
 
 
 def test_related_history_only_enters_revealed_followup_and_audit_stays_private(tmp_path):
