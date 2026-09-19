@@ -142,7 +142,12 @@ export function archiveSvg(input) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="520" viewBox="0 0 640 520" role="img" aria-label="个人学习档案分享卡"><rect width="640" height="520" rx="28" fill="${palette.bg}"/><path d="M42 78h556M42 444h556" stroke="${palette.line}" opacity=".7"/><text x="60" y="62" fill="${palette.line}" font-size="12" letter-spacing="3">PERSONAL LEARNING ARCHIVE</text><text fill="${palette.ink}" font-size="38" font-family="Songti SC,STSong,serif">${textLines(profile.nickname, 60, 145, 42, 13, 1)}</text><text fill="${palette.ink}" opacity=".78" font-size="17" font-family="PingFang SC,Microsoft YaHei,sans-serif">${textLines(profile.signature, 60, 190, 24, 29, 2)}</text><text x="60" y="260" fill="${palette.line}" font-size="12" letter-spacing="2">COLLECTED MEDALS</text>${medalRows}${statsRow}</svg>`;
 }
 
-export function downloadArchiveSvg(data, documentRef = document, urlApi = URL) {
+export function downloadArchiveSvg(
+  data,
+  documentRef = document,
+  urlApi = URL,
+  defer = (callback) => setTimeout(callback, 0),
+) {
   const blob = new Blob([archiveSvg(data)], {
     type: "image/svg+xml;charset=utf-8",
   });
@@ -150,6 +155,8 @@ export function downloadArchiveSvg(data, documentRef = document, urlApi = URL) {
   const link = documentRef.createElement("a");
   link.href = url;
   link.download = "我的学习档案.svg";
+  documentRef.body.appendChild(link);
   link.click();
-  urlApi.revokeObjectURL(url);
+  link.remove();
+  defer(() => urlApi.revokeObjectURL(url));
 }

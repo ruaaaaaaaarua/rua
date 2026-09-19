@@ -6,6 +6,7 @@ import {
   archiveSvg,
   acceptedArchiveSave,
   changeArchiveProfile,
+  downloadArchiveSvg,
   estimatedTextWidth,
   normalizeArchive,
   rejectedArchiveProfile,
@@ -163,5 +164,28 @@ describe("archive share output", () => {
     });
     expect(saved.profile.selected_medals).toEqual(["earned"]);
     expect(saved.error).toBe("");
+  });
+
+  it("keeps the download URL alive until after the attached link is clicked", () => {
+    const events = [];
+    let deferred;
+    const link = {
+      click: () => events.push("click"),
+      remove: () => events.push("remove"),
+    };
+    const documentRef = {
+      createElement: () => link,
+      body: { appendChild: () => events.push("append") },
+    };
+    const urlApi = {
+      createObjectURL: () => "blob:archive",
+      revokeObjectURL: () => events.push("revoke"),
+    };
+    downloadArchiveSvg(data, documentRef, urlApi, (callback) => {
+      deferred = callback;
+    });
+    expect(events).toEqual(["append", "click", "remove"]);
+    deferred();
+    expect(events).toEqual(["append", "click", "remove", "revoke"]);
   });
 });
