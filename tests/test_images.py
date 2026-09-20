@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 import pytest
 
@@ -18,7 +19,10 @@ def test_preserves_supported_small_image():
 
 @pytest.mark.skipif(sys.platform!='darwin',reason='macOS native HEIC conversion')
 def test_actual_user_heic_converts_locally_without_changing_original():
-    path=Path('/Users/ruaaaaaaaa/Downloads/IMG_1430.HEIC')
+    fixture=os.environ.get('GRID_TEST_HEIC')
+    if not fixture:
+        pytest.skip('optional HEIC fixture: set GRID_TEST_HEIC explicitly')
+    path=Path(fixture)
     if not path.exists():
         pytest.skip('user image is not part of the repository')
     raw=path.read_bytes()

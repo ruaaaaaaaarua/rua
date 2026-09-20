@@ -1,0 +1,7 @@
+{
+  "name": "grid-learning-engineering",
+  "private": true,
+  "scripts": {
+    "check": "python3 scripts/check.py"
+  }
+}
