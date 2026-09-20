@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.1.1",
@@ -22,6 +25,10 @@
     "katex": "0.18.7"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "eslint": "10.10.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "16.5.0",
     "vitest": "5.0.0"
   }
 }

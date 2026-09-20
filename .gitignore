@@ -9,3 +9,7 @@ web/node_modules/
 web/dist/
 .DS_Store
 *.log
+.mypy_cache/
+.ruff_cache/
+web/playwright-report/
+web/test-results/

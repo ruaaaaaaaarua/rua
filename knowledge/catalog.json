@@ -1,0 +1,290 @@
+{
+  "subject": "电力系统分析",
+  "version": "2026-09-scaffold",
+  "chapters": [
+    {
+      "id": "foundations",
+      "name": "电力系统基础"
+    },
+    {
+      "id": "models",
+      "name": "元件参数与等值网络"
+    },
+    {
+      "id": "power-flow",
+      "name": "稳态运行与潮流计算"
+    },
+    {
+      "id": "regulation",
+      "name": "频率与电压调整"
+    },
+    {
+      "id": "faults",
+      "name": "短路与故障分析"
+    },
+    {
+      "id": "stability",
+      "name": "电力系统稳定性"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "psa-system",
+      "name": "电力系统基本概念",
+      "chapter_id": "foundations",
+      "aliases": [
+        "电力系统"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-system.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-per-unit",
+      "name": "标幺制与基准值",
+      "chapter_id": "foundations",
+      "aliases": [
+        "标幺值",
+        "标幺制",
+        "基准值"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-per-unit.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-line",
+      "name": "输电线路参数与等值电路",
+      "chapter_id": "models",
+      "aliases": [
+        "线路参数",
+        "输电线路"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-line.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-transformer",
+      "name": "变压器参数与等值电路",
+      "chapter_id": "models",
+      "aliases": [
+        "变压器参数",
+        "变压器等值电路"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-transformer.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-generator",
+      "name": "发电机模型",
+      "chapter_id": "models",
+      "aliases": [
+        "同步发电机"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-generator.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-network",
+      "name": "电力网络等值",
+      "chapter_id": "models",
+      "aliases": [
+        "等值网络"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-network.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-power",
+      "name": "功率与电压分布",
+      "chapter_id": "power-flow",
+      "aliases": [
+        "功率分布",
+        "电压分布"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-power.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-loss",
+      "name": "功率损耗与电压损耗",
+      "chapter_id": "power-flow",
+      "aliases": [
+        "功率损耗",
+        "电压损耗"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-loss.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-flow",
+      "name": "潮流计算",
+      "chapter_id": "power-flow",
+      "aliases": [
+        "潮流",
+        "牛顿拉夫逊",
+        "PQ节点",
+        "PV节点"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-flow.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-frequency",
+      "name": "有功平衡与频率调整",
+      "chapter_id": "regulation",
+      "aliases": [
+        "调频",
+        "频率调整",
+        "有功平衡"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-frequency.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-voltage",
+      "name": "无功平衡与电压调整",
+      "chapter_id": "regulation",
+      "aliases": [
+        "调压",
+        "电压调整",
+        "无功平衡"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-voltage.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-economic",
+      "name": "经济运行",
+      "chapter_id": "regulation",
+      "aliases": [
+        "经济调度",
+        "经济运行"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-economic.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-three-phase",
+      "name": "三相短路分析",
+      "chapter_id": "faults",
+      "aliases": [
+        "三相短路",
+        "对称短路"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-three-phase.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-sequence",
+      "name": "对称分量与序网络",
+      "chapter_id": "faults",
+      "aliases": [
+        "对称分量",
+        "序网络",
+        "正序",
+        "负序",
+        "零序"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-sequence.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-asymmetric",
+      "name": "不对称短路分析",
+      "chapter_id": "faults",
+      "aliases": [
+        "不对称短路",
+        "单相接地短路",
+        "两相短路"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-asymmetric.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-rotor",
+      "name": "功角特性与转子运动",
+      "chapter_id": "stability",
+      "aliases": [
+        "功角",
+        "转子运动"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-rotor.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-static",
+      "name": "静态稳定",
+      "chapter_id": "stability",
+      "aliases": [
+        "静态稳定",
+        "小干扰稳定"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-static.md",
+      "sources": [],
+      "relations": []
+    },
+    {
+      "id": "psa-transient",
+      "name": "暂态稳定",
+      "chapter_id": "stability",
+      "aliases": [
+        "暂态稳定",
+        "等面积定则"
+      ],
+      "status": "draft",
+      "version": "1",
+      "content_file": "nodes/psa-transient.md",
+      "sources": [],
+      "relations": []
+    }
+  ]
+}

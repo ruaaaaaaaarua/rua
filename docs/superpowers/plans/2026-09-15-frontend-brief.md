@@ -1,0 +1,26 @@
+# Frontend task: 电力系统分析学习工作台
+
+## Scope
+
+Own web/src/* and web/index.html only. Redesign application UI fully, using current React/Vite/Lucide/Markdown/KaTeX dependencies. Do not edit backend. No external assets or fake demo/statistics. User authorized implementation. No need for further design approval. Preserve robust upload/model settings flows, remove automatic diagnosis, generated quizzes, self-reported reasoning/confidence fields, multi-subject navigation.
+
+## Design
+
+Premium quiet study workspace. Warm ivory canvas, deep forest ink sidebar, restrained green accent, editorial typography, fine borders, generous whitespace, clear active navigation. Main pages 学习台 / 知识库 / 复习. Desktop sidebar with subject and recent sessions; welcome dashboard upload/continue plus review summary and chapter previews. Compact tasteful settings modal, no giant dashboard metrics. Responsive down to 390px, keyboard-focus and aria labels. Use small modular components rather than one massive file. Math markdown must work.
+
+## API contract (backend implemented by parent)
+
+Existing GET /api/sessions => list {id,title,updated_at,status}; POST /api/sessions {} => full session {id,title,status,messages,questions,attachments}; GET/PATCH/DELETE same as current. New sessions direct mode only (hint settings legacy ignored).
+Existing upload/extract-stream/analyze pipeline remains. api.extractStream(id,onQuestion) then api.analyze(id). Question shape {id,number,text,kind:single|multiple|judge,options:[{key,text}],user_answer,recognition_note,attachment_id,links:[{knowledge_id,name,chapter_id,source}],candidates:[{id,name,chapter_id}],analysis:{status:confirmed|pending,correct:null|bool,explanation,answer,source:'model'|'wiki',citations:[{id,name,version}],knowledge_status:'available'|'empty'},revealed}. Answers/explanations delivered on session; explicit reveal endpoint records viewing. Initially hide explanation until click. Legacy question analysis may contain removed fields: never render diagnosis or mastery.
+PATCH /api/sessions/{sid}/questions/{qid} {text,options,user_answer,kind} invalidates solution. POST .../reveal {} records viewed; POST .../retry {answer} records in-app response; POST .../recheck {text} re-solves disputed answer. Question choice editing text support; no reasoning/confidence input.
+POST /api/sessions/{sid}/messages {text,question_id?:string,knowledge_id?:string} => full session. Messages {id,role,content,citations?:[{id,name,version}],knowledge_status?:'available'|'empty'}. Support open a concept and ask about it via knowledge_id even without question. Cite actual knowledge retrieved or badge 模型补充 / 知识正文待填充. No arbitrary HTML rendering.
+GET /api/wiki?q=search => {subject:'电力系统分析',version,chapters:[{id,name}],nodes:[{id,name,chapter_id,aliases,status:'draft'|'published',version,relations:[{type,target}],has_content:boolean}],published_count}. Query filters nodes. GET /api/wiki/{id} => node plus content Markdown, sources:array, related node descriptors, questions:[{session_id,question_id,text,number,links}], learning:{state,summary,event_count}. Entire initial KB is draft empty; must clearly show 待填充 and structured blank state. Offer chapter browsing and search. No content editing UI needed; explain maintainers fill knowledge/ files locally in empty detail.
+PUT /api/sessions/{sid}/questions/{qid}/links {knowledge_ids:[string]} => full session. Allow linking multiple existing nodes or unlinking all; link picker should load /api/wiki catalog. Do not permit creating nodes from model text.
+GET /api/reviews => {items:[{session_id,question_id,text,number,knowledge:[{id,name}],due_at,due:boolean,reason,state}],due_count,total}. UI tabs pending/all upcoming; if no due show upcoming honestly, allow early practice. POST /api/reviews/start {session_id,question_id} => {id,status:'ready',question:{id,text,kind,options,number},help_kind:'independent',source_label:'历史原题复习'}. No answer/explanation returned on start.
+POST /api/reviews/{id}/reveal {} => review run with answer,explanation,help_kind:'assisted'. POST /api/reviews/{id}/answer {answer} => {id,status:'answered',correct,answer,explanation,help_kind,next_due_at}. Display assistance and original-question nature, no mastery. Don't request reasoning. Repeated submit disabled. Review panel must hide original session solutions/citations until reveal or answer.
+GET /api/settings old shape with profiles, tasks now {vision,solve,chat}; PUT same three tasks plus mode:'direct',rate_tpm,parallel optional. Profiles support id,name,base_url,model,api_key(empty means keep),has_key,remove_key,disable_thinking,parallel. Keep ability add/remove multiple profiles, set three roles, save, test POST /api/settings/test {profile_id}. Existing saved profile secrets never returned.
+GET /api/knowledge => list fact states (optional not needed if wiki detail has learning). No demo endpoint in new app.
+
+## Verification / report
+
+Update web/src/domain.js and tests to new facts/stages as necessary. Run npm --prefix web test and npm --prefix web run build. Do not commit; shared workspace has parent backend edits. Report changed files/tests and important limitations to docs/superpowers/plans/2026-09-15-frontend-report.md (exception to ownership allowed). Parent will browser-test with backend. Do not edit api/schema contracts without messaging parent first.
